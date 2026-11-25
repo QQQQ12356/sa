@@ -1,0 +1,322 @@
+"""Three benchmarks with explicit method ownership and separate scoring jobs."""
+from __future__ import annotations
+
+import re
+import shutil
+from types import SimpleNamespace
+
+from search_comp.data.browsecomp_sft import SOURCE as BROWSECOMP_SFT
+from search_comp.evaluation.checkpoints import resolve_checkpoint
+from .runtime import ROOT, configure, digest, job, path, read_json, slug, stamp, write_json
+from .training import TRAINING_SOURCES
+
+BENCHMARKS = {"browsecomp", "browsecomp-plus", "hotpotqa"}
+CHECKPOINT_NAME = re.compile(r"checkpoint-[1-9][0-9]*")
+
+
+def online_options(benchmark_dir, **values):
+    options = dict(official_dir=path(benchmark_dir) / "vendor/OpenSeeker",
+                   data=path(benchmark_dir) / "questions.jsonl", csv=None, prepare_only=False,
+                   mode="native", benchmark="BrowseComp", output_dir=None, predictions=None,
+                   generate_only=False, run_dir=None, prompt_data=None, model=None,
+                   model_origin="checkpoint", kind=None, workers=1, judge_workers=1,
+                   judge_attempts=3, judge_max_tokens=1024, judge_timeout=120,
+                   judge_enable_thinking=False, skip_judge_preflight=False, limit=-1,
+                   max_tokens=8192, tool_count=200, max_context=131072, max_turns=200,
+                   tool_policy="stable", tool_call_retries=1, max_tool_tokens=32768,
+                   decoding="greedy", repetition_penalty=1.0, temperature=1.0, top_p=1.0,
+                   generation_seed=42, dry_run=False)
+    options.update(values)
+    return SimpleNamespace(**options)
+
+
+def offline_options(benchmark, benchmark_dir, **values):
+    options = dict(action="run", benchmark=benchmark, root=path(benchmark_dir), data=None,
+                   corpus=None, decrypted=False, corpus_limit=None, official_only=False,
+                   corpus_revision=None, dev_url=None, wiki_url=None, title_weight=1.0,
+                   verify_index=True, run_dir=None, prompt_data=None, model=None,
+                   retriever="bm25", vector_index_dir=None, embedding_model_path=None, embedding_device="cuda:0",
+                   observation_window=0, prompt_profile="legacy",
+                   model_origin="checkpoint", kind=None, output_dir=None, predictions=None,
+                   num_workers=1, shard_index=0, shard_count=1, limit=-1, topk=5,
+                   snippet_tokens=512, allow_visit=True, tool_call_retries=1, read_tokens=4096,
+                   tool_count=200, max_turns=200, max_context=131072, max_new_tokens=8192,
+                   max_tool_tokens=32768, judge_model=None, llm_judge=False, retrieval_only=False,
+                   judge_max_tokens=4096, judge_max_context=32768, judge_temperature=0,
+                   judge_attempts=3, judge_enable_thinking=False, skip_judge_preflight=False,
+                   judge_top_p=0.8, judge_top_k=20, seed=42, decoding="greedy",
+                   repetition_penalty=1.0, temperature=1.0, top_p=1.0, generation_seed=42,
+                   dry_run=False)
+    options.update(values)
+    return SimpleNamespace(**options)
+
+
+def prepare_benchmark(*, benchmark, version, phase, environment, data=None, corpus=None,
+                      decrypted=False, query_revision=None, corpus_revision=None,
+                      index_revision=None, title_weight=1.0, csv=None):
+    configure(environment)
+    if benchmark not in BENCHMARKS or phase not in {"download", "prepare", "index"}:
+        raise ValueError("无效 benchmark 或 PHASE")
+    directory = ROOT / "artifacts/benchmarks" / benchmark / slug(version)
+    settings = dict(benchmark=benchmark, version=version, phase=phase, data=data, corpus=corpus,
+                    decrypted=decrypted, query_revision=query_revision, corpus_revision=corpus_revision,
+                    index_revision=index_revision, title_weight=title_weight, csv=csv)
+    with job(directory / "jobs" / stamp(phase), "prepare_benchmark", settings):
+        if benchmark == "browsecomp":
+            if phase != "download":
+                raise ValueError("BrowseComp 使用 PHASE=download 同时准备题目和固定版本工具，无需本地索引")
+            from search_comp.workflows.benchmark_openseeker import ensure_official
+            from search_comp.evaluation.benchmark_data import prepare_browsecomp, read_questions, sha256
+            ensure_official(directory / "vendor/OpenSeeker")
+            questions = directory / "questions.jsonl"
+            if questions.exists():
+                manifest = read_json(questions.with_suffix(".manifest.json"))
+                if sha256(questions) != manifest["data_sha256"]:
+                    raise ValueError("已准备的 BrowseComp 题目已改变；请使用新 VERSION")
+                read_questions(questions)
+            else:
+                prepare_browsecomp(questions, path(csv) if csv else None)
+        else:
+            from search_comp.offline.assets import DEV_URL, WIKI_URL
+            from search_comp.workflows.offline_benchmark import run
+            run(offline_options(benchmark, directory, action=phase,
+                data=path(data) if data else None, corpus=path(corpus) if corpus else None,
+                decrypted=decrypted, query_revision=query_revision, corpus_revision=corpus_revision,
+                index_revision=index_revision, title_weight=title_weight,
+                dev_url=DEV_URL, wiki_url=WIKI_URL))
+
+
+def resolve_target(method, training_run, model_path, checkpoint=None):
+    if method == "baseline":
+        if training_run or checkpoint or not model_path:
+            raise ValueError("baseline 只接受本地 MODEL_PATH，不接受训练实验")
+        return "untrained", None, str(path(model_path)), "plain", "base-qwen35"
+    if method not in {"plain", "beacon"} or not training_run or model_path:
+        raise ValueError("plain/beacon 必须填写 TRAINING_RUN；模型自动从该实验读取")
+    run = path(training_run)
+    record = read_json(run / "job.json")
+    spec = read_json(run / "experiment.json")
+    if spec["method"] != method or spec["dataset_name"] not in TRAINING_SOURCES:
+        raise ValueError("训练实验与方法不一致")
+    if record["operation"] != "train":
+        raise ValueError("必须指定正式训练实验；plan 没有模型权重")
+    model = None
+    if checkpoint:
+        model_dir = (run / "models/model").resolve()
+        name = str(checkpoint)
+        candidate = (model_dir / name).resolve() if CHECKPOINT_NAME.fullmatch(name) else path(name)
+        if candidate.parent != model_dir or not CHECKPOINT_NAME.fullmatch(candidate.name):
+            raise ValueError("SA_CHECKPOINT 必须指向 SA_TRAINING_RUN/models/model/checkpoint-<正整数步数>")
+        model, _ = resolve_checkpoint(run, candidate, method, require_weights=True)
+    elif record["status"] != "complete":
+        raise ValueError("默认最终模型要求训练成功完成；可用 SA_CHECKPOINT 指定已保存的周期检查点")
+    return spec["dataset_name"], run, model, method, "checkpoint"
+
+
+def evaluate(*, method, benchmark, benchmark_dir, training_run, model_path, prompt_data,
+             run_name, generation, environment, checkpoint=None, overlap="off",
+             overlap_threshold=0.30, resume_from=None):
+    configure(environment)
+    if benchmark not in BENCHMARKS:
+        raise ValueError("不支持的 benchmark")
+    dataset_name, training_run, model, kind, origin = resolve_target(method, training_run, model_path, checkpoint)
+    spec = read_json(training_run / "experiment.json") if training_run else {}
+    shared_prompt = (benchmark == "browsecomp-plus"
+                     and generation.get("prompt_profile") in {"benchmark", "qwen-native"})
+    if shared_prompt and prompt_data:
+        raise ValueError("SA_PROMPT_DATA requires the training prompt profile")
+    if dataset_name == "mixed" and not shared_prompt and not prompt_data:
+        raise ValueError("混合训练实验须用 PROMPT_DATA 指定一套 system/tools 提示词")
+    source = spec.get("dataset_manifest", {}).get("arguments", {}).get("source")
+    if method != "baseline" and dataset_name != "mixed" and source != BROWSECOMP_SFT and prompt_data:
+        raise ValueError("训练方法的提示词从 TRAINING_RUN 读取，无需覆盖 PROMPT_DATA")
+    if overlap not in {"filter", "off"}:
+        raise ValueError("SA_OVERLAP 必须为 filter 或 off")
+    audit_overlap = overlap == "filter" and training_run is not None and benchmark in {"browsecomp", "browsecomp-plus"}
+    base = training_run if training_run else ROOT / "artifacts/experiments/baseline/untrained"
+    directory = base / "evaluation" / benchmark / stamp(run_name)
+    settings = dict(method=method, benchmark=benchmark, dataset_name=dataset_name,
+                    benchmark_dir=str(path(benchmark_dir)), training_run=training_run, model_path=model,
+                    checkpoint=checkpoint or None,
+                    prompt_data=str(path(prompt_data)) if prompt_data else None, generation=generation,
+                    overlap=overlap, overlap_threshold=overlap_threshold)
+    common = dict(run_dir=training_run, model=model, kind=kind, model_origin=origin,
+                  prompt_data=path(prompt_data) if prompt_data else None, output_dir=directory / "results")
+    previous_dir = None
+    if resume_from:
+        previous_dir, previous = resolve_evaluation(method, benchmark, resume_from)
+        for key in ("benchmark_dir", "training_run", "dataset_name", "overlap"):
+            if str(previous.get(key)) != str(settings[key]):
+                raise ValueError(f"续测配置与原测试不一致: {key}")
+        old_options = offline_options(benchmark, benchmark_dir, **previous["generation"])
+        new_options = offline_options(benchmark, benchmark_dir, **generation)
+        # Older local runs may have archived unused settings for the retired HTTP retriever.
+        adjustable = {"limit", "num_workers", "verify_index", "vllm_urls", "vllm_concurrency", "vllm_timeout",
+                      "search_service_url", "search_service_timeout"}
+        if bool(previous["generation"].get("vllm_urls")) != bool(generation.get("vllm_urls")):
+            raise ValueError("续测需沿用原推理后端")
+        for key in sorted((previous["generation"].keys() | generation.keys()) - adjustable):
+            if getattr(old_options, key, None) != getattr(new_options, key, None):
+                raise ValueError(f"续测生成配置与原测试不一致: {key}")
+        if audit_overlap != ("overlap_report_sha256" in previous):
+            raise ValueError("续测需沿用原测试的重合筛选模式和报告")
+        if audit_overlap:
+            audit = read_json(previous_dir / "overlap.json")
+            if (audit["threshold"] != overlap_threshold
+                    or audit["train_sha256"] != spec["data_fingerprints"]["train_data_path"]):
+                raise ValueError("续测的重合筛选阈值或训练数据指纹与原测试不一致")
+        settings["resume_from"] = str(previous_dir)
+        common.update(resume_from=previous_dir, resume_predictions_sha256=previous["predictions_sha256"],
+                      resume_manifest_sha256=previous["engine_manifest_sha256"])
+    with job(directory, "evaluate", settings):
+        report_path = None
+        if previous_dir and "overlap_report_sha256" in previous:
+            report_path = directory / "overlap.json"
+            shutil.copyfile(previous_dir / "overlap.json", report_path)
+            settings["overlap_report_sha256"] = digest(report_path)
+            if settings["overlap_report_sha256"] != previous["overlap_report_sha256"]:
+                raise ValueError("原测试的重合筛选报告在续测期间发生变化")
+            common["overlap_report"] = report_path
+        elif audit_overlap:
+            from search_comp.evaluation.training_overlap import audit_training_overlap
+            questions = path(benchmark_dir) / ("questions.jsonl" if benchmark == "browsecomp"
+                                              else "prepared/questions.jsonl")
+            report = audit_training_overlap(
+                questions, path(spec["training_config"]["train_data_path"]),
+                spec["data_fingerprints"]["train_data_path"], overlap_threshold)
+            report_path = directory / "overlap.json"
+            write_json(report_path, report)
+            settings["overlap_report_sha256"] = digest(report_path)
+            common["overlap_report"] = report_path
+            print(f"训练重合筛选排除 {len(report['excluded_ids'])}/{report['benchmark_questions']} 题", flush=True)
+        if benchmark == "browsecomp":
+            from search_comp.workflows.benchmark_openseeker import run
+            options = dict(generation)
+            options["max_tokens"] = options.pop("max_new_tokens")
+            # Offline retrieval knobs do not apply to the upstream online tools.
+            for key in ("num_workers", "title_weight", "verify_index", "topk", "snippet_tokens", "read_tokens", "allow_visit"):
+                options.pop(key, None)
+            run(online_options(benchmark_dir, **common, **options, generate_only=True))
+            predictions = directory / "results" / f"result_tool{generation['tool_count']}.jsonl"
+        else:
+            from search_comp.workflows.offline_benchmark import run
+            run(offline_options(benchmark, benchmark_dir, **common, **generation))
+            predictions = directory / "results/predictions.jsonl"
+        write_json(directory / "evaluation.json", dict(settings, predictions=str(predictions),
+                   predictions_sha256=digest(predictions),
+                   engine_manifest_sha256=digest(directory / "results/manifest.json")))
+    return directory
+
+
+def resolve_evaluation(method, benchmark, evaluation_dir):
+    directory = path(evaluation_dir)
+    record = read_json(directory / "job.json")
+    source = read_json(directory / "evaluation.json")
+    if record["operation"] != "evaluate" or record["status"] != "complete":
+        raise ValueError("评分和续测均要求原测试已成功完成")
+    if source["method"] != method or source["benchmark"] != benchmark:
+        raise ValueError("入口的方法或 benchmark 与原测试记录不一致")
+    if digest(source["predictions"]) != source["predictions_sha256"]:
+        raise ValueError("预测文件已改变，不能与原测试混合归档")
+    if digest(directory / "results/manifest.json") != source["engine_manifest_sha256"]:
+        raise ValueError("测试 manifest 已改变")
+    if "overlap_report_sha256" in source:
+        report = directory / "overlap.json"
+        if digest(report) != source["overlap_report_sha256"]:
+            raise ValueError("训练重合筛选报告已改变")
+        audit = read_json(report)
+        if digest(audit["questions_file"]) != audit["questions_sha256"]:
+            raise ValueError("评测题目已改变；请恢复原数据版本")
+    if benchmark == "browsecomp":
+        manifest = read_json(directory / "results/manifest.json")
+        if digest(path(source["benchmark_dir"]) / "questions.jsonl") != manifest["data_sha256"]:
+            raise ValueError("BrowseComp 题目在测试后改变，请恢复原数据版本")
+    return directory, source
+
+
+def score(*, method, benchmark, evaluation_dir, run_name, judge, environment):
+    configure(environment)
+    directory, source = resolve_evaluation(method, benchmark, evaluation_dir)
+    output = directory / "scores" / stamp(slug(run_name))
+    settings = dict(method=method, benchmark=benchmark, evaluation_dir=directory,
+                    predictions_sha256=source["predictions_sha256"], judge=judge)
+    with job(output, "score", settings):
+        common = dict(predictions=path(source["predictions"]), output_dir=output / "results",
+                      limit=source["generation"]["limit"])
+        if "overlap_report_sha256" in source:
+            common["overlap_report"] = directory / "overlap.json"
+        if benchmark == "browsecomp":
+            from search_comp.workflows.benchmark_openseeker import run
+            options = {key: value for key, value in judge.items() if key in {
+                "judge_workers", "judge_attempts", "judge_max_tokens", "judge_timeout", "judge_enable_thinking"}}
+            run(online_options(source["benchmark_dir"], **common, **options))
+        else:
+            from search_comp.workflows.offline_benchmark import run
+            options = {key: value for key, value in judge.items() if key != "judge_workers"}
+            if options.get("judge_backend") != "openai":
+                options["judge_model"] = path(options["judge_model"]) if options.get("judge_model") else None
+            run(offline_options(benchmark, source["benchmark_dir"], action="score", **common, **options))
+    return output
+
+
+def _browsecomp_plus_judge_options(judge):
+    import os
+
+    from search_comp.offline.assets import http_endpoint
+
+    judge = dict(judge)
+    if judge["judge_backend"] == "openai":
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError("OpenAI judging requires OPENAI_API_KEY")
+        judge["judge_url"] = http_endpoint(judge["judge_url"])
+    elif judge["judge_backend"] == "local":
+        if not judge["judge_model"] or not path(judge["judge_model"]).is_dir():
+            raise ValueError("local judging requires SA_JUDGE__JUDGE_MODEL to point to a directory")
+        judge.pop("judge_url")
+    else:
+        raise ValueError("SA_JUDGE__JUDGE_BACKEND must be openai or local")
+    if not judge["judge_model"] or min(judge["judge_attempts"], judge["judge_max_tokens"]) < 1:
+        raise ValueError("judge model, token budget and attempts must be configured")
+    if not 0 < judge["judge_timeout"] < float("inf"):
+        raise ValueError("judge timeout must be positive and finite")
+    return judge
+
+
+def run_browsecomp_plus(*, method, benchmark_dir, training_run=None, model_path=None, checkpoint=None,
+                        prompt_data, run_name, overlap="off", overlap_threshold=0.30, resume_from,
+                        evaluation_dir, score_after_generation, generation, judge, environment):
+    """Generate and score one run, or run either stage on its own."""
+    benchmark = "browsecomp-plus"
+    if method not in {"baseline", "plain", "beacon"}:
+        raise ValueError("method must be baseline, plain or beacon")
+    if evaluation_dir or score_after_generation:
+        judge = _browsecomp_plus_judge_options(judge)
+
+    if not evaluation_dir:
+        if method == "baseline":
+            base = model_path
+        else:
+            if not training_run:
+                raise ValueError("plain/beacon requires SA_TRAINING_RUN")
+            spec = read_json(path(training_run) / "experiment.json")
+            base = spec["training_config"]["model_name_or_path"]
+        if not base:
+            raise ValueError("SA_MODEL_PATH must point to the original Qwen3.5-4B for baseline")
+        if method == "baseline" or base != "Qwen/Qwen3.5-4B":
+            config = read_json(path(base) / "config.json")
+            text = config.get("text_config", config)
+            if (config.get("model_type") not in {"qwen3_5", "qwen3_5_text"}
+                    or (text.get("hidden_size"), text.get("intermediate_size"),
+                        text.get("num_hidden_layers")) != (2560, 9216, 32)):
+                raise ValueError("BrowseComp-Plus requires a Qwen3.5-4B backbone")
+        evaluation_dir = evaluate(method=method, benchmark=benchmark, benchmark_dir=benchmark_dir,
+                                  training_run=training_run, model_path=model_path, checkpoint=checkpoint,
+                                  prompt_data=prompt_data, run_name=run_name, generation=generation,
+                                  environment=environment, overlap=overlap,
+                                  overlap_threshold=overlap_threshold, resume_from=resume_from)
+        if not score_after_generation:
+            return evaluation_dir
+    score_dir = score(method=method, benchmark=benchmark, evaluation_dir=evaluation_dir,
+                      run_name="judge", judge=judge, environment=environment)
+    print(f"BrowseComp-Plus summary: {score_dir / 'results/summary.metrics.json'}", flush=True)
+    return score_dir

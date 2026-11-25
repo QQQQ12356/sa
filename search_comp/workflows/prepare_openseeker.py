@@ -1,0 +1,221 @@
+#!/usr/bin/env python
+"""Stream raw JSONL/Parquet into normalized, grouped, length-filtered JSONL.
+No GPU or model weights are loaded. Run from the project root.
+"""
+from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from search_comp.data.openseeker import normalize, encode, parse_calls, VERSION
+from search_comp.data.research import normalize_research, ADAPTER_VERSION
+from search_comp.data.browsecomp_sft import REPO, SOURCE, normalize_browsecomp_sft
+from search_comp.data.question_overlap import QuestionIndex
+
+MODELS = ['Qwen/Qwen3-4B-Thinking-2507', 'Qwen/Qwen3.5-4B']
+
+from search_comp.data.selection import selection_from_args
+
+
+def rows(path):
+    if path.suffix == '.parquet':
+        import pyarrow.parquet as pq
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=32):
+            yield from batch.to_pylist()
+    else:
+        with path.open(encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    yield json.loads(line)
+
+
+def stats(values):
+    import numpy as np
+    if not values:
+        return {'n': 0}
+    x = np.asarray(values)
+    return dict(n=len(x), min=int(x.min()), max=int(x.max()), mean=float(x.mean()),
+                **{f'p{p}': float(np.percentile(x, p)) for p in (50, 90, 95, 99)},
+                **{f'over_{n}': int((x > n).sum()) for n in (8192, 16384, 32768, 65536)})
+
+
+def initialize(models, offline):
+    global TOKENIZERS
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    from transformers import AutoTokenizer
+    TOKENIZERS = {m: AutoTokenizer.from_pretrained(m, local_files_only=offline) for m in models}
+
+
+def measure(item):
+    source, index, raw = item
+    try:
+        adapter = row_adapter(source.split('/')[0])
+        row = adapter(raw, source, index)
+        lengths = {}
+        for name, tok in TOKENIZERS.items():
+            encoded = encode(row['messages'], tok, tools=row.get('tools'))
+            lengths[name] = dict(total=len(encoded['input_ids']),
+                                 observations=sum(b-a for a,b in encoded['regions']),
+                                 assistant=sum(v != -100 for v in encoded['labels']))
+        row['lengths'] = lengths
+        calls = [c for m in row['messages'] if m['role'] == 'assistant' for c in parse_calls(m['content'])]
+        facts = dict(roles=Counter(m['role'] for m in row['messages']),
+                     tools=Counter(c['name'] for c in calls),
+                     calls=len(calls), messages=len(row['messages']),
+                     cjk=any('\u4e00' <= c <= '\u9fff' for c in row['question']),
+                     correctness=row['correctness'] or 'unspecified')
+        return row, facts, None
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+        return None, None, dict(source=source, index=index, reason=str(e))
+
+
+def dump(f, obj):
+    f.write(json.dumps(obj, ensure_ascii=False) + '\n')
+
+def row_adapter(source):
+    return {'research': normalize_research, SOURCE: normalize_browsecomp_sft}.get(source, normalize)
+
+
+def prepare_sft_input(raw, canonical, protected):
+    messages = json.loads(raw['messages']) if isinstance(raw['messages'], str) else raw['messages']
+    question = messages[1]['content']
+    if protected.matches(question):
+        return 'protected_question'
+    if 'data_source' in raw:
+        return None
+    if canonical is None:
+        raise ValueError('data.parquet requires SA_CANONICAL_QUESTIONS')
+    matches = canonical.matches(question)
+    if not matches or (len(matches) > 1 and matches[0][1] - matches[1][1] < 0.10):
+        return 'unresolved_benchmark_question'
+    match = matches[0][0]
+    if protected.matches(match['query']):
+        return 'protected_question'
+    raw.update(canonical_question=match['query'], benchmark_question_id=match['id'])
+    return None
+
+def run(args):
+    from search_comp.experiments.validation import ConfigError
+    p = ConfigError()
+    if args.workers < 1 or args.max_length < 1:
+        p.error('workers and max-length must be positive')
+    selection = selection_from_args(args)
+    if not 0 <= args.val_fraction + args.test_fraction < 1 or min(args.val_fraction, args.test_fraction) < 0:
+        p.error('invalid split fractions')
+    # Validate tokenizer availability before creating output artifacts.
+    initialize(args.models, args.offline)
+    if args.tokenizer and args.tokenizer not in args.models:
+        p.error('requested tokenizer was not measured')
+    if args.source == SOURCE:
+        from search_comp.evaluation.benchmark_data import read_questions, sha256
+        references = [*args.protected_questions]
+        if args.canonical_questions:
+            references.append(args.canonical_questions)
+        reference_digests = {file: sha256(file) for file in references}
+        canonical = (QuestionIndex(read_questions(args.canonical_questions), args.overlap_threshold)
+                     if args.canonical_questions else None)
+        protected = QuestionIndex(
+            (row for file in args.protected_questions for row in read_questions(file)),
+            args.overlap_threshold)
+        if canonical is None and any(file.stem == 'data' for file in args.input):
+            p.error('data.parquet requires SA_CANONICAL_QUESTIONS')
+    args.output.mkdir(parents=True, exist_ok=False)
+    counters = Counter(); roles = Counter(); tools = Counter(); correctness = Counter()
+    metrics = defaultdict(list); seen = set(); known_splits = {}
+    # Preserve published validation questions, even if duplicated in train.
+    for path in args.input:
+        if path.stem in ('val', 'validation', 'test'):
+            for i, raw in enumerate(rows(path)):
+                try:
+                    adapter = row_adapter(args.source)
+                    key = adapter(raw, args.source, i)['question_id']
+                    known_splits[key] = 'test' if path.stem == 'test' else 'validation'
+                except (ValueError, KeyError, TypeError):
+                    pass
+    def items():
+        n = 0
+        for path in args.input:
+            for i, raw in enumerate(rows(path)):
+                if args.limit is not None and n >= args.limit:
+                    return
+                source = f'{args.source}/{path.name}'
+                if args.source == SOURCE:
+                    try:
+                        reason = prepare_sft_input(raw, canonical, protected)
+                    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as error:
+                        reason = f'invalid_source_row: {error}'
+                    if reason:
+                        counters['input'] += 1
+                        counters[reason.split(':', 1)[0]] += 1
+                        dump(handles['rejected'], dict(source=source, index=i, reason=reason))
+                        n += 1
+                        continue
+                yield source, i, raw
+                n += 1
+    handles = {n: (args.output / f'{n}.jsonl').open('w') for n in
+               ('normalized', 'train', 'validation', 'test', 'rejected', 'measurements')}
+    try:
+        with ProcessPoolExecutor(args.workers, initializer=initialize,
+                                 initargs=(args.models, args.offline)) as pool:
+            # Bounded chunks keep memory stable for multi-GB input.
+            from itertools import islice
+            stream = iter(items())
+            while chunk := list(islice(stream, args.workers * 8)):
+                for row, facts, error in pool.map(measure, chunk, chunksize=2):
+                    counters['input'] += 1
+                    if error:
+                        counters['invalid'] += 1; dump(handles['rejected'], error); continue
+                    dump(handles['normalized'], row)
+                    roles.update(facts['roles']); tools.update(facts['tools'])
+                    correctness[facts['correctness']] += 1
+                    counters['questions_with_cjk'] += facts['cjk']
+                    for k in ('calls', 'messages'):
+                        metrics[k].append(facts[k])
+                    for model, lengths in row['lengths'].items():
+                        for kind, count in lengths.items():
+                            metrics[f'{model}/{kind}'].append(count)
+                    key = row['question_id']
+                    reason = selection.rejection(row)
+                    if not reason and key in seen:
+                        reason = 'duplicate_question'
+                    if reason:
+                        counters[reason] += 1
+                        dump(handles['rejected'], dict(id=row['id'], reason=reason, lengths=row['lengths']))
+                    else:
+                        seen.add(key)
+                        u = int(hashlib.sha256(f'{args.seed}:{key}'.encode()).hexdigest()[:12], 16) / 16**12
+                        split = known_splits.get(key) or ('test' if u < args.test_fraction else
+                            'validation' if u < args.test_fraction + args.val_fraction else 'train')
+                        counters[split] += 1; dump(handles[split], row)
+                    dump(handles['measurements'], dict(id=row['id'], question_id=key,
+                         lengths=row['lengths'], tools=facts['tools'], calls=facts['calls'], rejection=reason))
+                if counters['input'] % 256 == 0:
+                    print(dict(counters), flush=True)
+    finally:
+        for f in handles.values():
+            f.close()
+    manifest = dict(protocol=VERSION, arguments={k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()},
+                    counts=dict(counters), roles=dict(roles), tools=dict(tools), correctness=dict(correctness),
+                    distributions={k:stats(v) for k,v in metrics.items()}, inputs=[])
+    manifest['arguments']['input'] = [str(p.resolve()) for p in args.input]
+    if args.source == 'research':
+        manifest.update(adapter_version=ADAPTER_VERSION, training_only=True,
+                        dataset_id='AmanPriyanshu/tool-reasoning-sft-RESEARCH-OpenSeeker-v1-Data',
+                        note='Held-out demonstrations are not independent benchmark gold answers.')
+    elif args.source == SOURCE:
+        manifest.update(adapter_version='browsecomp-sft-v1', training_only=True,
+                        dataset_id=REPO, question_references=reference_digests)
+    for path in args.input:
+        h = hashlib.sha256()
+        with path.open('rb') as f:
+            for block in iter(lambda:f.read(8*1024*1024), b''):
+                h.update(block)
+        manifest['inputs'].append(dict(path=str(path.resolve()), bytes=path.stat().st_size, sha256=h.hexdigest()))
+    manifest['tokenizers'] = {m:dict(name=t.name_or_path, vocab_size=len(t),
+        backend_sha256=hashlib.sha256(t.backend_tokenizer.to_str().encode()).hexdigest()) for m,t in TOKENIZERS.items()}
+    (args.output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+'\n')
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))

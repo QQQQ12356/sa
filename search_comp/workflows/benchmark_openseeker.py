@@ -1,0 +1,395 @@
+"""Run pinned OpenSeeker generation with auditable, bounded model judging."""
+from __future__ import annotations
+
+import ast
+from collections import Counter
+from contextlib import nullcontext
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import threading
+import time
+
+from search_comp.evaluation.benchmark_data import prepare_browsecomp, read_questions, sha256
+from search_comp.evaluation.checkpoints import load_evaluation_model, resolve_checkpoint
+from search_comp.utils.progress import CompletionProgress, generation_label
+
+OFFICIAL_URL = "https://github.com/PolarSeeker/OpenSeeker.git"
+OFFICIAL_REVISION = "e3dec1f727d87c5eaa93506e4882c67237647098"
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def ensure_official(path, allow_download=True):
+    """Fetch into a new directory only; never reset an existing user checkout."""
+    if not path.exists() and not allow_download:
+        raise FileNotFoundError("先运行 scripts/data/sh/30_prepare_browsecomp.sh 准备官方工具")
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", OFFICIAL_URL, str(path)], check=True)
+        subprocess.run(["git", "-C", str(path), "checkout", "--detach", OFFICIAL_REVISION], check=True)
+    revision = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    dirty = subprocess.check_output(["git", "-C", str(path), "status", "--porcelain",
+                                     "--untracked-files=no"], text=True).strip()
+    if revision != OFFICIAL_REVISION or dirty:
+        raise ValueError(f"official checkout must be clean at {OFFICIAL_REVISION}; use a new --official-dir")
+    for name in ("eval/eval.py", "eval/prompt.py", "eval/generate_answer_v2.py", "src/tools/visit.py"):
+        if not (path / name).is_file():
+            raise ValueError(f"missing official source: {name}")
+    return revision
+
+
+def require_environment(mode, generate=True, score=True):
+    names = ["SCORER_URLS", "SCORER_API_KEY", "SCORER_MODEL_NAME"] if score else []
+    if generate:
+        names += ["SUMMARY_API_URL", "SUMMARY_API_KEY", "SUMMARY_MODEL_NAME", "JINA_API_KEYS"]
+        provider = os.environ.get("SEARCH_PROVIDER", "serper")
+        if provider not in {"serper", "tavily"}:
+            raise ValueError("SEARCH_PROVIDER must be serper or tavily")
+        names += ["TAVILY_API_KEY" if provider == "tavily" else
+                  ("SERPER_API_KEY" if os.environ.get("SERPER_API_KEY") else "SERPER_KEY_ID")]
+        if mode != "native":
+            names += ["OPENSEEKER_BASE_URL", "OPENSEEKER_MODEL"]
+        if mode == "official-v2":
+            names += ["E2B_API_KEY"]
+    missing = [name for name in names if not os.environ.get(name, "").strip()
+               or os.environ[name].startswith("YOUR_")]
+    if missing:
+        raise ValueError("configure environment variables: " + ", ".join(missing))
+
+
+def run_logged(command, cwd, log, progress_path=None, total=None, label=None, key="query", item_type=None):
+    print("[benchmark] " + shlex.join(map(str, command)), flush=True)
+    with log.open("x", encoding="utf-8") as target:
+        lock = threading.Lock()
+
+        def emit(line):
+            with lock:
+                print(line, flush=True)
+                target.write(line + "\n")
+                target.flush()
+
+        progress = (CompletionProgress([progress_path], total, label, key=key,
+                                       item_type=item_type, emit=emit) if progress_path else None)
+        process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True,
+                                   env=dict(os.environ, PYTHONUNBUFFERED="1"))
+        try:
+            with progress.watch() if progress else nullcontext():
+                for line in process.stdout:
+                    emit(line.rstrip("\n"))
+                code = process.wait()
+            if code:
+                raise subprocess.CalledProcessError(code, command)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+
+
+def generation_command(args, data, output):
+    script = "generate_answer_v2.py" if args.mode == "official-v2" else "generate_answer.py"
+    return [sys.executable, str(args.official_dir / "eval" / script),
+            "--dataset_path", str(data), "--out_dir", str(output),
+            "--max_worker", str(args.workers), "--max_tokens", str(args.max_tokens),
+            "--tool_count_max", str(args.tool_count), "--max_retry_rounds", "1"]
+
+
+def boxed_instruction(official_dir):
+    tree = ast.parse((official_dir / "eval/generate_answer_v2.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and
+                t.id == "BOX_FORMAT_INSTRUCTION" for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise ValueError("upstream v2 boxed instruction not found")
+
+
+def align_results(rows, raw_path, destination, suffix=""):
+    """Select the latest attempt per query, retain missing questions in denominator."""
+    expected = {row["query"] + suffix: row for row in rows}
+    found = {}
+    attempts = 0
+    if raw_path.is_file():
+        for line in raw_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            result = json.loads(line)
+            query = result.get("query")
+            if query not in expected:
+                raise ValueError("prediction query does not belong to this benchmark/protocol")
+            if result.get("answer") != expected[query]["answer"]:
+                raise ValueError("prediction reference differs from benchmark")
+            if not isinstance(result.get("final_response"), str):
+                raise ValueError("prediction final_response must be text")
+            if result.get('status', 'completed') != 'completed':
+                result = dict(result, final_response='')
+            found[query] = result
+            attempts += 1
+    missing = empty = 0
+    with destination.open("x", encoding="utf-8") as target:
+        for query, row in expected.items():
+            result = found.get(query)
+            if result is None:
+                missing += 1
+                result = dict(row, query=query, final_response="", status="generation_missing")
+            empty += not bool(result["final_response"].strip())
+            target.write(json.dumps(result, ensure_ascii=False) + "\n")
+    return dict(expected=len(rows), unique_predictions=len(found), attempts=attempts,
+                missing_predictions=missing, empty_predictions=empty)
+
+
+def audit_scores(path, expected):
+    labels = {}
+    seen = set()
+    empty_overrides = 0
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            item = json.loads(line)
+            if item.get("type") == "item":
+                index, score = item["item_index"], item.get("score")
+                if type(index) is not int or not 0 <= index < expected:
+                    raise ValueError("invalid judge item_index")
+                if index in seen:
+                    raise ValueError("duplicate judge item_index")
+                seen.add(index)
+                if "final_response" in item and isinstance(item["final_response"], str) and not item["final_response"].strip():
+                    empty_overrides += score == 1
+                    score = 0
+                if type(score) in (int, float) and score in (0, 1):
+                    labels[index] = score
+    correct = sum(labels.values())
+    return dict(empty_score_overrides=empty_overrides, judged=len(labels), judge_unknown_or_error=expected - len(labels),
+                official_accuracy=correct / len(labels) if labels else None,
+                accuracy_all_questions=correct / expected, complete=len(labels) == expected)
+
+
+def native_generate(args, rows, output, prompt=None):
+    """Use the shared SFT/native protocol with upstream online search/visit."""
+    sys.path.insert(0, str(args.official_dir / "src"))
+    from llm_tool_openseeker import Search, Visit
+    from search_comp.data.agent_prompt import initial_messages, resolve_system_prompt
+    from search_comp.evaluation.tool_agent import ModelGenerator, Registry, run_agent, decoding_options
+
+    progress = CompletionProgress((), len(rows), generation_label(getattr(args, "benchmark", "browsecomp")), key="query")
+    system, prompt_source = (prompt if prompt is not None else
+                             resolve_system_prompt(getattr(args, 'prompt_data', None), args.run_dir))
+    model_path, kind = resolve_checkpoint(args.run_dir, args.model, args.kind)
+    generation_options = decoding_options(args)
+    origin = getattr(args, 'model_origin', 'checkpoint')
+    if origin == 'base-qwen35':
+        generation_options['reuse_plain_cache'] = False
+    print(f"[benchmark native generation] loading {kind} checkpoint={model_path}", flush=True)
+    model, tokenizer = load_evaluation_model(model_path, kind, origin, args.run_dir)
+    print("[benchmark native generation] model ready", flush=True)
+    generate = ModelGenerator(model, tokenizer, kind == "beacon", **generation_options)
+    generate.metadata.update(checkpoint=model_path, model_origin=origin)
+    if origin == 'base-qwen35':
+        generate.metadata['base_model_path'] = model_path
+    search, visit = Search(), Visit()
+    if getattr(args, 'tool_policy', 'official') == 'stable':
+        from search_comp.evaluation.online_visit import StableVisit
+        visit = StableVisit()
+    with output.open("x", encoding="utf-8") as target:
+        for index, row in enumerate(rows):
+            start = time.monotonic()
+            def log(message):
+                print(f"[benchmark native {index + 1}/{len(rows)}] {message}", flush=True)
+            tools = Registry({"search": lambda **kw: search.call(kw),
+                              "visit": lambda **kw: visit.call(kw)}, log=log, max_calls=args.tool_count)
+            log("question start")
+            messages = initial_messages(row["query"], system=system)
+            result = run_agent(messages, tokenizer, generate, tools, args.max_turns,
+                               args.max_context, args.max_tokens, args.max_tool_tokens, log=log,
+                               **(dict(max_call_retries=args.tool_call_retries) if hasattr(args, "tool_call_retries") else {}))
+            result.update(row, final_response=result["prediction"], prompt_source=prompt_source,
+                          elapsed_seconds=time.monotonic() - start,
+                          tool_calls=sum(len(e.get("calls", [])) for e in result["events"]))
+            target.write(json.dumps(result, ensure_ascii=False) + "\n")
+            target.flush()
+            progress.record(result)
+
+def resume_native(args, rows, output, manifest, predictions):
+    from search_comp.data.agent_prompt import prompt_metadata, resolve_system_prompt
+    from search_comp.evaluation.benchmark_resume import prefix_length, publish_continuation
+
+    source = args.resume_from / "results"
+    manifest_path = source / "manifest.json"
+    if sha256(manifest_path) != args.resume_manifest_sha256:
+        raise ValueError("原测试结果清单已改变")
+    previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in ("benchmark", "mode", "model", "kind", "official_revision", "official_script_sha256",
+                "data_sha256", "search_provider", "summary_model"):
+        if key == "summary_model" and key not in previous:
+            continue  # Legacy native runs did not record the summary model.
+        if previous.get(key) != manifest[key]:
+            raise ValueError(f"续测与原测试的结果来源不一致: {key}")
+    original_rows = read_questions(source / "questions.jsonl")
+    count = prefix_length([row["id"] for row in original_rows], rows)
+    if count != previous["count"] or original_rows != rows[:count]:
+        raise ValueError("原测试的选题记录与目标题目前缀不一致")
+    prompt = resolve_system_prompt(getattr(args, "prompt_data", None), args.run_dir)
+    prompt_hash = prompt_metadata(prompt[0])["system_prompt_sha256"]
+    extension = output / "extension"
+
+    def generate(new_rows):
+        extension.mkdir()
+        path = extension / predictions.name
+        native_generate(args, new_rows, path, prompt)
+        return path
+
+    print(f"[benchmark] reuse {count} predictions; generate {len(rows) - count} additional questions", flush=True)
+    publish_continuation(predictions, source / predictions.name, rows, count, prompt_hash,
+                         args.resume_predictions_sha256, generate, require_index=False)
+    manifest["resume"] = dict(source=str(args.resume_from), reused=count, newly_generated=len(rows) - count,
+                              predictions_sha256=args.resume_predictions_sha256,
+                              manifest_sha256=args.resume_manifest_sha256)
+
+
+def run(args):
+    from search_comp.experiments.validation import ConfigError
+    from search_comp.evaluation.tool_agent import decoding_options
+    parser = ConfigError()
+    try:
+        generation_options = decoding_options(args)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.mode != 'native' and generation_options:
+        parser.error('decoding overrides are supported in native mode only')
+    if args.mode != 'native' and args.model_origin != 'checkpoint':
+        parser.error('base-qwen35 loading is supported in native mode only')
+    for name in ("workers", "judge_workers", "judge_attempts", "judge_max_tokens", "max_tokens", "tool_count", "max_context", "max_turns", "max_tool_tokens"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.tool_call_retries < 0:
+        parser.error("--tool-call-retries must be nonnegative")
+    if not 0 < args.judge_timeout < float("inf"):
+        parser.error("--judge-timeout must be positive and finite")
+    if args.limit != -1 and args.limit < 1:
+        parser.error("--limit must be -1 (full benchmark) or positive")
+    for name in ("official_dir", "data", "output_dir", "predictions", "run_dir", "csv", "prompt_data"):
+        value = getattr(args, name)
+        if value is not None:
+            setattr(args, name, value.expanduser().resolve())
+    if args.mode != "native" and (args.run_dir or args.model or args.kind == "beacon"):
+        parser.error("official modes use OPENSEEKER_BASE_URL/MODEL; serve Plain via 48, use --mode native for Beacon")
+    if args.mode != "native" and args.prompt_data:
+        parser.error("--prompt-data is for native mode; official modes retain upstream prompts")
+    resume_from = getattr(args, "resume_from", None)
+    if resume_from and (args.mode != "native" or not args.generate_only or args.prepare_only or args.predictions):
+        parser.error("续测仅支持 native 模式的正式生成入口")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    output = args.output_dir or ((args.run_dir / "evaluation" if args.run_dir else ROOT / "artifacts/unassigned")
+                                 / f"benchmark_{args.mode}_{stamp}")
+    if args.dry_run:
+        command = generation_command(args, args.data, output) if args.mode != "native" else [
+            "native_generate", "--run-dir", str(args.run_dir), "--model", str(args.model)]
+        if args.predictions:
+            command = ["import_predictions", str(args.predictions)]
+        print(json.dumps(dict(revision=OFFICIAL_REVISION, mode=args.mode, model_origin=args.model_origin, data=str(args.data),
+                              generate_only=args.generate_only,
+                              output=str(output), prompt_data=str(args.prompt_data) if args.prompt_data else None,
+                              generation=command,
+                              judging=dict(policy="stable-judge-v1", workers=args.judge_workers,
+                                           attempts=args.judge_attempts, max_tokens=args.judge_max_tokens,
+                                           timeout=args.judge_timeout, enable_thinking=args.judge_enable_thinking,
+                                           preflight=not args.skip_judge_preflight),
+                              tools=dict(policy=args.tool_policy, call_retries=args.tool_call_retries),
+                              decoding=dict(mode=args.decoding, repetition_penalty=args.repetition_penalty,
+                                            temperature=args.temperature, top_p=args.top_p,
+                                            generation_seed=args.generation_seed)), indent=2))
+        return
+    if output.exists() and not args.prepare_only:
+        parser.error("output directory exists; use a new --output-dir (no overwriting or stale judge cache)")
+    if not args.prepare_only:
+        if args.generate_only and args.predictions:
+            parser.error('--generate-only cannot be combined with --predictions')
+        require_environment(args.mode, generate=args.predictions is None, score=not args.generate_only)
+        if args.mode == "native" and not args.predictions:
+            resolve_checkpoint(args.run_dir, args.model, args.kind)
+    revision = ensure_official(args.official_dir, allow_download=args.prepare_only)
+    if not args.data.exists():
+        if not args.prepare_only:
+            raise FileNotFoundError("先运行 scripts/data/sh/30_prepare_browsecomp.sh 准备题目")
+        if args.benchmark != "BrowseComp":
+            parser.error("custom benchmark requires an existing --data JSONL")
+        prepare_browsecomp(args.data, args.csv)
+    rows = read_questions(args.data)
+    if args.prepare_only:
+        print(f"[benchmark] ready: {len(rows)} questions; official revision={revision}")
+        return
+    from search_comp.evaluation.training_overlap import select_questions
+    overlap_report = getattr(args, "overlap_report", None)
+    rows = select_questions(rows, args.limit, overlap_report)
+    output.mkdir(parents=True)
+    dataset = output / "questions.jsonl"
+    dataset.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    manifest = dict(benchmark=args.benchmark, mode=args.mode, official_revision=revision,
+                    official_url=OFFICIAL_URL, data_sha256=sha256(args.data),
+                    selection=("training-overlap filtered; " if overlap_report else "") +
+                              ("first N in source order" if args.limit > 0 else "full source order"),
+                    count=len(rows), judge_model=os.environ.get("SCORER_MODEL_NAME") if not args.generate_only else None,
+                    search_provider=os.environ.get("SEARCH_PROVIDER", "serper"),
+                    summary_model=os.environ.get("SUMMARY_MODEL_NAME"),
+                    arguments={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+                    created_at=datetime.now(timezone.utc).isoformat())
+    if args.mode == "native" and not args.predictions:
+        model, kind = resolve_checkpoint(args.run_dir, args.model, args.kind)
+        manifest.update(model=model, kind=kind, generation_alignment="original training system/schema; shared native serializer; upstream v1 tools")
+    elif not args.predictions:
+        manifest.update(model=os.environ["OPENSEEKER_MODEL"], generation_alignment="unmodified official script")
+    else:
+        manifest.update(predictions_sha256=sha256(args.predictions), generation_alignment="imported predictions; verify provenance")
+    from search_comp.evaluation import judging
+    manifest["judge_policy"] = judging.POLICY
+    manifest["judge_implementation_sha256"] = sha256(Path(judging.__file__))
+    manifest["local_workflow_sha256"] = sha256(__file__)
+    manifest["official_script_sha256"] = {
+        str(path.relative_to(args.official_dir)): sha256(path)
+        for path in sorted((args.official_dir / "eval").glob("*.py"))}
+    data_manifest = args.data.with_suffix(".manifest.json")
+    if data_manifest.is_file():
+        metadata = json.loads(data_manifest.read_text())
+        if metadata.get("data_sha256") != sha256(args.data):
+            raise ValueError("benchmark differs from its preparation manifest; restore or import as custom data")
+        manifest["dataset_manifest"] = metadata
+    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    raw = args.predictions or output / f"result_tool{args.tool_count}.jsonl"
+    if not args.predictions:
+        if resume_from:
+            resume_native(args, rows, output, manifest, raw)
+            (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        elif args.mode == "native":
+            native_generate(args, rows, raw)
+        else:
+            run_logged(generation_command(args, dataset, output), args.official_dir, output / "generation.log",
+                       raw, len(rows), generation_label(args.benchmark))
+    aligned = output / "result_for_judge.jsonl"
+    suffix = boxed_instruction(args.official_dir) if args.mode == "official-v2" else ""
+    coverage = align_results(rows, raw, aligned, suffix)
+    (output / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
+    if args.generate_only:
+        print(json.dumps(dict(coverage, predictions=str(raw), action='generate-only'), indent=2))
+        return
+    # The official assignment is a string literal followed by .strip().
+    prompt = judging.load_judge_prompt(args.official_dir / "eval/prompt.py")
+    client = judging.ChatJudge(os.environ["SCORER_URLS"], os.environ["SCORER_MODEL_NAME"],
+                               os.environ["SCORER_API_KEY"], args.judge_max_tokens,
+                               args.judge_timeout, args.judge_enable_thinking)
+    aligned_rows = [json.loads(line) for line in aligned.read_text().splitlines() if line.strip()]
+    judging.score_online(aligned_rows, prompt, client, output, args.judge_workers,
+                         args.judge_attempts, not args.skip_judge_preflight)
+    scores = audit_scores(output / "result_for_judge_eval.jsonl", len(rows))
+    summary = dict(coverage, **scores, mode=args.mode, benchmark=args.benchmark,
+                   official_revision=revision, metric="OpenSeeker JUDGE_PROMPT_BC_en with stable judging", judge_policy=judging.POLICY,
+                   generation_status_counts=dict(Counter(row.get("status", "unreported") for row in aligned_rows)),
+                   judge_preflight_enabled=not args.skip_judge_preflight)
+    from search_comp.evaluation.answer_metrics import answer_metrics
+    summary.update(answer_metrics(aligned_rows, aligned_rows))
+    summary['llm_judge_accuracy'] = scores['accuracy_all_questions']
+    (output / "summary.metrics.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+    if not scores["complete"]:
+        raise RuntimeError("judge coverage incomplete; inspect judge.log and summary (not a complete benchmark score)")

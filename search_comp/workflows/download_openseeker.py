@@ -1,0 +1,74 @@
+#!/usr/bin/env python
+"""Download pinned HF snapshots, retain originals and export every split as JSONL."""
+import hashlib
+import json
+import os
+from pathlib import Path
+from search_comp.data.browsecomp_sft import REPO, SHARDS, SOURCE
+
+
+def export_parquet(path, target):
+    """Export without changing any downloaded source file."""
+    import pyarrow.parquet as pq
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.jsonl.tmp')
+    try:
+        with temporary.open('w', encoding='utf-8') as out:
+            for batch in pq.ParquetFile(path).iter_batches(batch_size=32):
+                for row in batch.to_pylist():
+                    out.write(json.dumps(row, ensure_ascii=False) + '\n')
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+
+
+def run(args):
+    from search_comp.experiments.validation import ConfigError
+    p = ConfigError()
+    os.environ['HF_ENDPOINT'] = args.endpoint
+    from huggingface_hub import HfApi, snapshot_download
+    repos = dict(polar='PolarSeeker/OpenSeeker-v1-Data', zephyr='Zephyr271828/openseeker_v1_sft',
+                 research='AmanPriyanshu/tool-reasoning-sft-RESEARCH-OpenSeeker-v1-Data')
+    repos[SOURCE] = REPO
+    for source, repo in repos.items():
+        if args.source != source and (args.source != 'all' or source == SOURCE):
+            continue
+        info = HfApi(endpoint=args.endpoint).dataset_info(repo, revision=args.revision)
+        directory = args.output / info.sha if source == SOURCE else args.output / source / info.sha
+        patterns = [*SHARDS, 'README.md'] if source == SOURCE else ['*.jsonl', '*.parquet', 'README.md']
+        snapshot_download(repo, repo_type='dataset', revision=info.sha, endpoint=args.endpoint,
+                          local_dir=str(directory), allow_patterns=patterns)
+        files = []
+        jsonl_inputs = []
+        for path in sorted(directory.rglob('*')):
+            if path.relative_to(directory).parts[0] in ('exports', '.cache'):
+                continue
+            if path.suffix not in ('.jsonl','.parquet'):
+                continue
+            h=hashlib.sha256()
+            with path.open('rb') as f:
+                for block in iter(lambda:f.read(8*1024*1024),b''): h.update(block)
+            files.append(dict(path=str(path),sha256=h.hexdigest(),bytes=path.stat().st_size))
+            if source == SOURCE:
+                continue
+            if path.suffix == '.parquet':
+                # Prefer an existing native JSONL of the same stem to avoid
+                # feeding the same representation twice into preprocessing.
+                if path.with_suffix('.jsonl').is_file():
+                    continue
+                target = directory / 'exports' / path.relative_to(directory).with_suffix('.jsonl')
+                export_parquet(path, target)
+                jsonl_inputs.append(str(target.resolve()))
+            else:
+                jsonl_inputs.append(str(path.resolve()))
+        parquet_inputs = [str((directory / name).resolve()) for name in SHARDS] if source == SOURCE else []
+        if source == SOURCE and any(not Path(name).is_file() for name in parquet_inputs):
+            raise ValueError('BrowseComp SFT snapshot is missing a required shard')
+        if not (jsonl_inputs or parquet_inputs):
+            raise ValueError('snapshot contains no supported JSONL/Parquet data files')
+        (directory/'download_manifest.json').write_text(json.dumps(dict(repo=repo,revision=info.sha,
+            endpoint=args.endpoint,files=files,jsonl_inputs=jsonl_inputs,
+            parquet_inputs=parquet_inputs),indent=2)+'\n', encoding='utf-8')
+        print(directory)

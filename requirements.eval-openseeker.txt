@@ -1,0 +1,16 @@
+# 独立评测环境，不覆盖训练环境；与固定官方版本的直接工具依赖对齐。
+-r requirements.tools-export.txt
+# BrowseComp 工具固定版本在对应 artifacts/benchmarks/browsecomp/VERSION/vendor/OpenSeeker 中准备。
+openai==2.26.0
+qwen-agent==0.0.34
+tavily-python>=0.5.0
+requests==2.32.5
+Jinja2==3.1.6
+json5==0.13.0
+jsonlines==4.0.0
+tiktoken==0.12.0
+tqdm==4.67.3
+python-dotenv==1.2.2
+e2b==2.20.3
+e2b-code-interpreter==2.6.2
+# Beacon 的在线 BrowseComp 需要摘要端点，见 docs/11_sglang_summary.md。

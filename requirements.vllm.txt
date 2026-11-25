@@ -1,0 +1,2 @@
+# Isolated Linux server for original and text-only Qwen3.5 checkpoints.
+vllm==0.31.0

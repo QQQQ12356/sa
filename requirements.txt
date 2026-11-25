@@ -1,0 +1,4 @@
+# Linux 环境统一依赖；先由 scripts/tools/00_setup_environment.py 安装 CUDA PyTorch。
+-r requirements.train-cu126.txt
+-r requirements.eval-openseeker.txt
+pytest>=8,<10

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# BrowseComp-Plus vLLM 生成与评分。参数见 docs/32_browsecomp_plus_vllm.md。
+set -euo pipefail
+
+PYTHON_BIN="${PYTHON_BIN:-python}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
+[[ $(uname -s) == Linux ]] || { echo '此入口仅支持 Linux。' >&2; exit 2; }
+unset SA_SERVE_PORT
+if (( $# )); then
+  [[ $# == 2 && $1 == serve && $2 =~ ^[0-9]+$ ]] || { echo '用法：bash 本脚本 [serve PORT]' >&2; exit 2; }
+  export SA_SERVE_PORT="$2"
+fi
+cd -- "$PROJECT_ROOT"
+
+# 由 cu126 Python 启动。通过 CUDA_VISIBLE_DEVICES 为服务或向量检索选择 GPU。
+export HF_ENDPOINT=https://huggingface.co
+export HF_HUB_OFFLINE=1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export SA_BENCHMARK_DIR=artifacts/benchmarks/browsecomp-plus/v2
+
+# 未训练的本地 Qwen3.5-4B 权重目录。
+export SA_MODEL_PATH=/models/Qwen3.5-4B
+export SA_RUN_NAME=baseline-bcp4b
+export SA_RESUME_FROM=''  # 从已完成评测扩展题数时填写旧评测根目录。
+export SA_EVALUATION_DIR=''  # 填已有评测根目录时，仅重新评分。
+export SA_SCORE_AFTER_GENERATION=false  # EVALUATION_DIR 为空时生效。false 仅生成。
+
+# 推理端口支持逗号分隔的本机副本。每个副本最多同时处理 32 题。
+export SA_GENERATION__VLLM_URLS=http://127.0.0.1:8010/v1
+export SA_GENERATION__VLLM_CONCURRENCY=32
+export SA_GENERATION__VLLM_TIMEOUT=300
+export SA_GENERATION__PROMPT_DATE='' # 可填 YYYY-MM-DD 以固定实验提示词日期。
+
+# LIMIT=-1 全量，首次检查建议 1 至 5 题。
+export SA_GENERATION__LIMIT=-1
+# 0 为 No CM；5 保留最近五个成功工具轮次。对照实验使用独立 RUN_NAME。
+export SA_GENERATION__OBSERVATION_WINDOW=0
+export SA_GENERATION__MAX_TURNS=200
+export SA_GENERATION__MAX_CONTEXT=131072
+export SA_GENERATION__MAX_NEW_TOKENS=8192
+export SA_GENERATION__TOOL_COUNT=4096
+export SA_GENERATION__DECODING=sample
+export SA_GENERATION__REPETITION_PENALTY=1.0
+export SA_GENERATION__TEMPERATURE=1.0
+export SA_GENERATION__TOP_P=1.0
+export SA_GENERATION__GENERATION_SEED=42
+
+# bm25=官方 Lucene（31）；qwen3-embedding-8b=官方向量 + FAISS（31、33）。
+export SA_GENERATION__RETRIEVER=bm25
+export SA_GENERATION__VECTOR_INDEX_DIR=''  # 本地向量模式填 33 的输出目录。
+export SA_GENERATION__EMBEDDING_MODEL_PATH=''  # 本地向量模式填匹配的 Qwen3-Embedding-8B。
+export SA_GENERATION__EMBEDDING_DEVICE=cuda:0
+export SA_GENERATION__VERIFY_INDEX=true
+export SA_GENERATION__TITLE_WEIGHT=1.0  # 仅旧版或自定义语料的 SQLite BM25 使用。
+export SA_GENERATION__TOPK=15
+
+# openai 使用 OPENAI_API_KEY（从 Linux 环境传入）；local 使用本地裁判路径。
+export SA_JUDGE__JUDGE_BACKEND=openai
+export SA_JUDGE__JUDGE_MODEL=gpt-5-mini
+export SA_JUDGE__JUDGE_URL=https://api.openai.com/v1
+export SA_JUDGE__JUDGE_MAX_TOKENS=4096
+export SA_JUDGE__JUDGE_ATTEMPTS=3
+export SA_JUDGE__JUDGE_TIMEOUT=120
+
+export SA_ENTRY=baseline/46_run_browsecomp_plus
+export SA_LAUNCHER="$SCRIPT_DIR/46_run_browsecomp_plus.sh"
+exec "$PYTHON_BIN" "$PROJECT_ROOT/scripts/baseline/py/46_run_browsecomp_plus.py"
