@@ -22,7 +22,10 @@ from search_comp.offline.assets import (BCP_HIGHLIGHT_JARS, BCP_LUCENE_DIR, DEV_
                                         dump, enforce_offline, http_endpoint, verify_official)
 from search_comp.offline.browsecomp_plus import extract_exact_answer, system_prompt
 from search_comp.offline.data import prepare, records
-from search_comp.offline.index import CORPUS_VERSION, LocalIndex, LuceneIndex, build_index, lucene_metadata
+from search_comp.offline.index import (
+    CORPUS_VERSION, LocalIndex, LuceneIndex, ParquetCorpus, build_index, lucene_metadata,
+    parquet_corpus_metadata,
+)
 from search_comp.offline.qwen_embedding import BACKEND as DENSE_BACKEND, DenseIndex, read_vector_manifest
 from search_comp.offline.scoring import LocalJudge, load_predictions, score_browsecomp, score_hotpot
 from search_comp.offline.tools import BCP_INSTRUCTION, HOTPOT_INSTRUCTION, LocalTools
@@ -60,8 +63,7 @@ def prepare_phase(args):
     return result
 
 
-def verify_index(args, manifest):
-    print(f"[offline {args.benchmark}] checking local index; verify_checksum={args.verify_index}", flush=True)
+def verify_sqlite(args, manifest):
     index_path = args.root / "index.sqlite"
     try:
         index = LocalIndex(index_path, args.verify_index)
@@ -81,8 +83,20 @@ def verify_index(args, manifest):
     with index:
         if index.manifest["benchmark"] != args.benchmark or index.manifest["corpus_sha256"] != manifest["corpus_sha256"]:
             raise ValueError("index and dataset have different corpus/benchmark provenance")
-        metadata = index.manifest
-    if getattr(args, "retriever", "bm25") == "bm25":
+        return index.manifest
+
+
+def verify_index(args, manifest):
+    print(f"[offline {args.benchmark}] checking local index; verify_checksum={args.verify_index}", flush=True)
+    if getattr(args, "retriever", "bm25") == DENSE_BACKEND:
+        dense = read_vector_manifest(args.vector_index_dir, manifest, args.embedding_model_path, args.verify_index)
+        if dense.get("storage") == "parquet-and-pickle":
+            metadata = parquet_corpus_metadata(args.root, manifest, args.verify_index)
+        else:
+            metadata = verify_sqlite(args, manifest)
+        metadata = dict(metadata, retriever=DENSE_BACKEND, vector_index=dense, ranking="faiss-index-flat-ip")
+    else:
+        metadata = verify_sqlite(args, manifest)
         assets = manifest.get("assets", {})
         if manifest["canonical_corpus"] and assets.get("bm25_files"):
             lucene = lucene_metadata(args.root, assets, args.verify_index)
@@ -91,9 +105,6 @@ def verify_index(args, manifest):
             raise ValueError("missing official Lucene BM25 provenance; restore the downloaded snapshot")
         elif metadata["title_weight"] != args.title_weight:
             raise ValueError("TITLE_WEIGHT differs from the built index; rebuild in a new ROOT")
-    else:
-        dense = read_vector_manifest(args.vector_index_dir, manifest, args.embedding_model_path, args.verify_index)
-        metadata = dict(metadata, retriever=DENSE_BACKEND, vector_index=dense, ranking="faiss-index-flat-ip")
     if getattr(args, "prompt_profile", "legacy") == "qwen-native":
         assets = json.loads((args.root / "assets.json").read_text(encoding="utf-8"))
         expected = assets.get("lucene_highlighter_sha256", {})
@@ -105,6 +116,12 @@ def verify_index(args, manifest):
                 raise ValueError(f"Lucene highlighter JAR checksum changed: {jar}")
         metadata = dict(metadata, browser_highlighter_sha256=expected)
     return metadata
+
+
+def open_documents(stack, root, metadata, *, threaded):
+    if metadata.get("version") == "parquet-corpus-v1":
+        return ParquetCorpus(root, metadata)
+    return stack.enter_context(LocalIndex(root / "index.sqlite", threaded=threaded))
 
 
 def agent_prompt(args):
@@ -159,7 +176,7 @@ def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
     statuses = Counter()
     start = time.monotonic()
     with ExitStack() as stack:
-        index = stack.enter_context(LocalIndex(args.root / "index.sqlite", threaded=native))
+        index = open_documents(stack, args.root, index_metadata, threaded=native)
         retrieval = index
         if getattr(args, "retriever", "bm25") == DENSE_BACKEND:
             retrieval = DenseIndex(index, args.vector_index_dir, args.embedding_model_path,
@@ -242,7 +259,7 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
         http = stack.enter_context(httpx.Client(timeout=args.vllm_timeout, trust_env=False, limits=limits))
         clients = [VllmClient(http, url, model, args.model_origin, options, args.max_context) for url in urls]
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
-        documents = stack.enter_context(LocalIndex(args.root / "index.sqlite", threaded=True))
+        documents = open_documents(stack, args.root, metadata, threaded=True)
         highlight = load_highlighter(args.root)
         if args.retriever == DENSE_BACKEND:
             retrieval = DenseIndex(documents, args.vector_index_dir, args.embedding_model_path,

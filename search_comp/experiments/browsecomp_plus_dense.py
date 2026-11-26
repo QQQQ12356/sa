@@ -1,34 +1,18 @@
 """Download official assets or encode the prepared corpus into an exact dense index."""
 from itertools import islice
-import pickle
 from time import monotonic
 
 from search_comp.offline.assets import BCP_INDEX_REPO
 from search_comp.offline.data import records
 from search_comp.offline.qwen_embedding import (
-    BACKEND, DIMENSION, MODEL_REPO, QUERY_MAX_LENGTH, QUERY_PREFIX, VERSION, Encoder, model_identity,
+    BACKEND, DIMENSION, MODEL_REPO, QUERY_MAX_LENGTH, QUERY_PREFIX, SHARDS, VERSION, Encoder,
+    model_identity, official_blocks,
 )
 from .data import download_model
 from .runtime import ROOT, configure, digest, job, path, read_json, slug, stamp, write_json
 
 
 INDEX_REPO = BCP_INDEX_REPO
-SHARDS = tuple(f"{BACKEND}/corpus.shard{i}_of_4.pkl" for i in range(1, 5))
-
-
-class VectorUnpickler(pickle.Unpickler):
-    """Accept the NumPy array primitives used by the official vector shards."""
-
-    def find_class(self, module, name):
-        import numpy as np
-
-        if module == "numpy" and name in {"ndarray", "dtype"}:
-            return getattr(np, name)
-        allowed = {"multiarray": "_reconstruct", "numeric": "_frombuffer"}
-        for submodule, member in allowed.items():
-            if module in {f"numpy.core.{submodule}", f"numpy._core.{submodule}"} and name == member:
-                return getattr(getattr(np._core, submodule), member)
-        raise pickle.UnpicklingError(f"unexpected vector shard global: {module}.{name}")
 
 
 def download_vectors(root, revision, endpoint):
@@ -45,16 +29,7 @@ def download_vectors(root, revision, endpoint):
     write_json(directory / "download_manifest.json", dict(repo=INDEX_REPO, revision=commit,
                files={name: digest(directory / name) for name in SHARDS}))
     print(f"SA_OFFICIAL_INDEX_DIR = {str(directory)!r}", flush=True)
-
-
-def official_blocks(directory, provenance):
-    for name in SHARDS:
-        filename = directory / name
-        if digest(filename) != provenance["files"][name]:
-            raise ValueError(f"downloaded vector shard checksum changed: {filename}")
-        with filename.open("rb") as stream:
-            vectors, ids = VectorUnpickler(stream).load()
-        yield vectors, [str(docid) for docid in ids]
+    print(f"SA_GENERATION__VECTOR_INDEX_DIR = {str(directory)!r}", flush=True)
 
 
 def encode_blocks(corpus, encoder, batch_size, max_length):
@@ -87,7 +62,7 @@ def prepare_vectors(root, directory, source, model_dir, official_index_dir, devi
         expected_revision = manifest["assets"].get("index_revision")
         if expected_revision and provenance["revision"] != expected_revision:
             raise ValueError("official vectors and BM25 must come from the same index snapshot")
-        blocks = official_blocks(official_index_dir, provenance)
+        blocks = official_blocks(official_index_dir, provenance, verify=True)
     else:
         print(f"[dense index] loading encoder on {device}; documents={count}", flush=True)
         blocks = encode_blocks(corpus, Encoder(model_dir, device), batch_size, doc_max_length)

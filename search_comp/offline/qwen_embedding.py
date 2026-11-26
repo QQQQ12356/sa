@@ -1,8 +1,9 @@
 """Qwen3-Embedding-8B query encoding and exact vector search over BrowseComp-Plus."""
 import json
 from pathlib import Path
+import pickle
 
-from .assets import digest
+from .assets import BCP_INDEX_REPO, digest
 
 
 MODEL_REPO = "Qwen/Qwen3-Embedding-8B"
@@ -11,6 +12,33 @@ VERSION = "browsecomp-plus-qwen3-dense-v1"
 DIMENSION = 4096
 QUERY_PREFIX = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
 QUERY_MAX_LENGTH = 8192
+SHARDS = tuple(f"{BACKEND}/corpus.shard{i}_of_4.pkl" for i in range(1, 5))
+
+
+class VectorUnpickler(pickle.Unpickler):
+    """Accept the NumPy array primitives used by the official vector shards."""
+
+    def find_class(self, module, name):
+        import numpy as np
+
+        if module == "numpy" and name in {"ndarray", "dtype"}:
+            return getattr(np, name)
+        allowed = {"multiarray": "_reconstruct", "numeric": "_frombuffer"}
+        for submodule, member in allowed.items():
+            if module in {f"numpy.core.{submodule}", f"numpy._core.{submodule}"} and name == member:
+                core = np._core if hasattr(np, "_core") else np.core
+                return getattr(getattr(core, submodule), member)
+        raise pickle.UnpicklingError(f"unexpected vector shard global: {module}.{name}")
+
+
+def official_blocks(directory, provenance, verify=False):
+    for name in SHARDS:
+        filename = directory / name
+        if verify and digest(filename) != provenance["files"][name]:
+            raise ValueError(f"downloaded vector shard checksum changed: {filename}")
+        with filename.open("rb") as stream:
+            vectors, ids = VectorUnpickler(stream).load()
+        yield vectors, [str(docid) for docid in ids]
 
 
 def model_identity(directory):
@@ -53,6 +81,25 @@ class Encoder:
 
 def read_vector_manifest(directory, corpus, model_dir, verify=False):
     directory = Path(directory)
+    if not (directory / "manifest.json").is_file() and (directory / "download_manifest.json").is_file():
+        upstream = json.loads((directory / "download_manifest.json").read_text(encoding="utf-8"))
+        if (upstream.get("repo") != BCP_INDEX_REPO or not upstream.get("revision")
+                or set(upstream.get("files", {})) != set(SHARDS)):
+            raise ValueError("vector index directory is not an official BrowseComp-Plus snapshot")
+        if not corpus["canonical_corpus"]:
+            raise ValueError("official vectors require the canonical, complete BrowseComp-Plus corpus")
+        if upstream["revision"] != corpus["assets"].get("index_revision"):
+            raise ValueError("official vector shards must share the pinned index revision")
+        for name in SHARDS:
+            filename = directory / name
+            if not filename.is_file():
+                raise FileNotFoundError(f"missing official vector shard: {filename}")
+            if verify and digest(filename) != upstream["files"][name]:
+                raise ValueError(f"downloaded vector shard checksum changed: {filename}")
+        return dict(version=VERSION, benchmark="browsecomp-plus", source="official", storage="parquet-and-pickle",
+                    upstream=upstream, model=model_identity(model_dir), documents=corpus["documents"],
+                    corpus_sha256=corpus["corpus_sha256"], dimension=DIMENSION,
+                    query_prefix=QUERY_PREFIX, query_max_length=QUERY_MAX_LENGTH)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if (manifest.get("version") != VERSION or manifest.get("benchmark") != "browsecomp-plus"
             or manifest.get("corpus_sha256") != corpus["corpus_sha256"]
@@ -74,7 +121,7 @@ def read_vector_manifest(directory, corpus, model_dir, verify=False):
 
 
 class DenseIndex:
-    """Replace only search ranking. SQLite still owns documents and visit."""
+    """Search official vector shards or a prepared vector matrix by inner product."""
 
     def __init__(self, documents, directory, model_dir, device, manifest):
         import numpy as np
@@ -84,13 +131,28 @@ class DenseIndex:
             raise RuntimeError("dense retrieval requires FAISS; install requirements.browsecomp-plus.txt") from error
 
         self.documents = documents
-        vectors = np.load(Path(directory) / "vectors.npy", mmap_mode="r", allow_pickle=False)
-        self.docids = json.loads((Path(directory) / "docids.json").read_text(encoding="utf-8"))
-        if (vectors.shape != (manifest["documents"], DIMENSION) or vectors.dtype != np.float32
-                or len(self.docids) != manifest["documents"] or len(set(self.docids)) != len(self.docids)):
-            raise ValueError("invalid dense index shape, dtype or document IDs")
+        directory = Path(directory)
+        direct = manifest.get("storage") == "parquet-and-pickle"
+        if direct:
+            blocks = official_blocks(directory, manifest["upstream"])
+        else:
+            vectors = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
+            ids = json.loads((directory / "docids.json").read_text(encoding="utf-8"))
+            blocks = [(vectors, ids)]
+        self.docids = []
         self.index = faiss.IndexFlatIP(DIMENSION)
-        self.index.add(vectors)
+        for vectors, ids in blocks:
+            if direct:
+                vectors = np.ascontiguousarray(vectors, dtype=np.float32)
+            if vectors.shape != (len(ids), DIMENSION) or vectors.dtype != np.float32:
+                raise ValueError("invalid dense vector block shape or dtype")
+            self.index.add(vectors)
+            self.docids.extend(ids)
+        docids = set(self.docids)
+        if len(self.docids) != manifest["documents"] or len(docids) != len(self.docids):
+            raise ValueError("invalid dense index shape, dtype or document IDs")
+        if direct and docids != documents.by_id.keys():
+            raise ValueError("official vector document IDs do not match the Parquet corpus")
         self.encoder = Encoder(model_dir, device)
 
     def search(self, query, topk=5):

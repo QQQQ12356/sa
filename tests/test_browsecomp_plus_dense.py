@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import pickle
@@ -10,6 +11,7 @@ from search_comp.experiments import browsecomp_plus_dense, runtime
 from search_comp.experiments.browsecomp_plus_dense import INDEX_REPO, SHARDS
 from search_comp.experiments.runtime import digest, write_json
 from search_comp.offline import qwen_embedding as dense
+from search_comp.workflows.offline_benchmark import open_documents, verify_index
 
 
 @pytest.mark.parametrize("prepared_dir", ["", "shared/prepared"])
@@ -67,3 +69,50 @@ def test_import_dense_shards_joins_by_docid_and_validates_provenance(tmp_path, m
     write_json(Path(target) / "docids.json", ids)
     with pytest.raises(ValueError, match="checksum changed"):
         dense.read_vector_manifest(target, manifest, model, verify=True)
+
+
+def test_official_dense_reads_parquet_and_shards_without_converted_assets(tmp_path, monkeypatch):
+    pytest.importorskip("faiss")
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    corpus = tmp_path / "raw/corpus/data/corpus.parquet"
+    corpus.parent.mkdir(parents=True)
+    ids = ["a", "b", "c", "d"]
+    urls = [f"https://example.com/{docid}" for docid in ids]
+    pq.write_table(pa.table(dict(docid=ids, url=urls, text=[
+        f"---\ntitle: Document {docid}\n---\nBody {docid}" for docid in ids
+    ])), corpus)
+    corpus_files = {"data/corpus.parquet": digest(corpus)}
+    manifest = dict(benchmark="browsecomp-plus", canonical_corpus=True, documents=len(ids),
+                    corpus_sha256="prepared-hash", source_corpus=corpus_files,
+                    assets=dict(index_revision="test", raw_parquet_sha256={"corpus": corpus_files}))
+
+    model = tmp_path / "model"
+    model.mkdir()
+    write_json(model / "config.json", {})
+    write_json(model / "download_manifest.json", dict(repo_id=dense.MODEL_REPO, revision="test"))
+    source = tmp_path / "official"
+    (source / dense.BACKEND).mkdir(parents=True)
+    vectors = np.eye(len(ids), dense.DIMENSION, dtype=np.float32)
+    for i, (name, docid) in enumerate(zip(SHARDS, reversed(ids))):
+        with (source / name).open("wb") as stream:
+            pickle.dump((vectors[i:i + 1], [docid]), stream)
+    write_json(source / "download_manifest.json", dict(repo=INDEX_REPO, revision="test",
+               files={name: digest(source / name) for name in SHARDS}))
+    args = SimpleNamespace(benchmark="browsecomp-plus", retriever=dense.BACKEND, verify_index=True,
+                           root=tmp_path, vector_index_dir=source, embedding_model_path=model)
+    metadata = verify_index(args, manifest)
+    assert metadata["version"] == "parquet-corpus-v1"
+    monkeypatch.setattr(dense, "Encoder", lambda *args: SimpleNamespace(
+        encode=lambda queries, length: vectors[1:2] + 0.25 * vectors[0:1]))
+    with ExitStack() as stack:
+        documents = open_documents(stack, tmp_path, metadata, threaded=True)
+        index = dense.DenseIndex(documents, source, model, "cpu", metadata["vector_index"])
+        assert [doc["docid"] for doc in index.search("test", 2)] == ["c", "d"]
+        assert documents.get_url(urls[2]) == index.get("c")
+        assert index.get("c")["text"] == "Body c"
+
+    with corpus.open("ab") as stream:
+        stream.write(b"tampered")
+    with pytest.raises(ValueError, match="Parquet corpus checksum changed"):
+        verify_index(args, manifest)

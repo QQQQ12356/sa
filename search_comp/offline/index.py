@@ -11,9 +11,55 @@ import time
 from urllib.parse import quote
 
 from .assets import BCP_LUCENE_DIR, digest, dump
+from .data import document, records
 
 VERSION = "sqlite-fts5-bm25-v1"
 CORPUS_VERSION = "sqlite-corpus-v1"
+
+
+def parquet_corpus_metadata(root, manifest, verify=False):
+    directory = root / "raw/corpus"
+    files = manifest["assets"].get("raw_parquet_sha256", {}).get("corpus", {})
+    actual = {file.relative_to(directory).as_posix() for file in directory.rglob("*.parquet")
+              if file.is_file() and ".cache" not in file.relative_to(directory).parts}
+    if not files or files != manifest["source_corpus"] or actual != files.keys():
+        raise ValueError(f"official Parquet corpus files do not match the prepared snapshot: {directory}")
+    if verify and any(digest(directory / name) != checksum for name, checksum in files.items()):
+        raise ValueError(f"official Parquet corpus checksum changed: {directory}")
+    return dict(version="parquet-corpus-v1", benchmark=manifest["benchmark"],
+                count=manifest["documents"], corpus_sha256=manifest["corpus_sha256"], files=files)
+
+
+class ParquetCorpus:
+    """Serve documents by ID or URL directly from the official Parquet snapshot."""
+
+    def __init__(self, root, metadata):
+        self.by_id = {}
+        self.by_url = {}
+        for name in sorted(metadata["files"]):
+            path = root / "raw/corpus" / name
+            for row in records(path, parquet_columns=["docid", "url", "text"]):
+                value = document(row, "browsecomp-plus", aligned_parquet=True)
+                docid = value.pop("id")
+                value.update(docid=docid, url="local://" + quote(docid, safe=""))
+                if docid in self.by_id:
+                    raise ValueError(f"duplicate Parquet corpus document ID: {docid}")
+                self.by_id[docid] = value
+                self.by_url[value["source_url"]] = value
+        if len(self.by_id) != metadata["count"]:
+            raise ValueError("Parquet document count differs from the prepared snapshot")
+
+    def get(self, docid):
+        value = self.by_id.get(str(docid))
+        if value is None:
+            raise ValueError(f"document not found: {docid}")
+        return value
+
+    def get_url(self, url):
+        value = self.by_url.get(url)
+        if value is None:
+            raise ValueError(f"URL is absent from the fixed corpus: {url}")
+        return value
 
 
 def build_index(root, title_weight=1.0):

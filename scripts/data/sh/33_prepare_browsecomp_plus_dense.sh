@@ -21,7 +21,7 @@ export CUDA_VISIBLE_DEVICES=0
 export SA_VERSION=v2
 # 向量索引版本名。切换来源、模型或编码配置时改名，禁止覆盖。
 export SA_INDEX_PROFILE=qwen3-embedding-8b-official
-# 先 download 下载资产，再 prepare 导入向量或编码本地语料。
+# official 可直接使用 download 输出的向量目录。prepare 用于旧格式转换或自行编码。
 export SA_PHASE=download
 # official 导入官方 4 个分片；encode 对 prepared/corpus.jsonl 逐批编码。
 export SA_SOURCE=official
