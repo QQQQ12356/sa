@@ -115,12 +115,17 @@ def encode_prompt(tokenizer, messages, *, beacon=False):
     chunks = re.split(f"{marker}_[0-9]+_END", template)
     if len(chunks) != len(bodies) + 1:
         raise ValueError("native chat template must preserve tool message bodies")
-    rebuilt, spans = chunks[0], []
-    for body, chunk in zip(bodies, chunks[1:]):
-        spans.append((len(rebuilt), len(rebuilt) + len(body)))
-        rebuilt += body + chunk
-    if rebuilt != prompt:
-        raise ValueError("native chat template changed tool body rendering")
+    # Qwen3.5 trims message content; other native templates preserve it.
+    # Use spans only from a reconstruction matching the actual prompt exactly.
+    for rendered_bodies in (bodies, [body.strip() for body in bodies]):
+        rebuilt, spans = chunks[0], []
+        for body, chunk in zip(rendered_bodies, chunks[1:]):
+            spans.append((len(rebuilt), len(rebuilt) + len(body)))
+            rebuilt += body + chunk
+        if rebuilt == prompt:
+            break
+    else:
+        raise ValueError("native chat template changed tool body rendering beyond supported whitespace trimming")
     tokens = tokenizer(prompt, add_special_tokens=False, return_offsets_mapping=True)
     if tokens["input_ids"] != ids:
         raise ValueError("native tokenizer offset mapping changed prompt token IDs")

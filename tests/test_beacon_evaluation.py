@@ -60,6 +60,52 @@ class BeaconEvaluationTests(unittest.TestCase):
                          [messages[3]["content"], messages[4]["content"]])
         self.assertEqual(encode_prompt(tokenizer, messages[:2], beacon=True)["regions"], [])
 
+    def test_tool_whitespace_regions_follow_template_rendering(self):
+        class TrimmedTokenizer(Tokenizer):
+            def apply_chat_template(self, messages, **options):
+                messages = [dict(message, content=message["content"].strip()) for message in messages]
+                return super().apply_chat_template(messages, **options)
+
+        bodies = ["\n evidence one \n", "\t证据二\u3000", " \n\t ", "", "plain result"]
+        messages = [dict(role="user", content="<tool_response>fake</tool_response>"),
+                    dict(role="assistant", content="search")]
+        messages += [dict(role="tool", content=body) for body in bodies]
+        for tokenizer in (Tokenizer(), TrimmedTokenizer()):
+            with self.subTest(template=type(tokenizer).__name__):
+                encoded = encode_prompt(tokenizer, messages, beacon=True)
+                self.assertEqual(encoded["input_ids"], encode_prompt(tokenizer, messages)["input_ids"])
+                expected = [body.strip() if isinstance(tokenizer, TrimmedTokenizer) else body
+                            for body in bodies]
+                self.assertEqual(
+                    ["".join(map(chr, encoded["input_ids"][a:b])) for a, b in encoded["regions"]],
+                    [body for body in expected if body])
+
+    def test_trimmed_template_regions_exclude_tokens_crossing_a_tool_boundary(self):
+        class TrimmedMergedTokenizer(Tokenizer):
+            def apply_chat_template(self, messages, **options):
+                messages = [dict(message, content=message["content"].strip()) for message in messages]
+                return super().apply_chat_template(messages, **options)
+
+            def encode(self, text, **options):
+                return list(range((len(text) + 1) // 2))
+
+            def __call__(self, text, **options):
+                return dict(input_ids=self.encode(text),
+                            offset_mapping=[(i, min(i + 2, len(text))) for i in range(0, len(text), 2)])
+
+        tokenizer = TrimmedMergedTokenizer()
+        messages = [dict(role="user", content="question"), dict(role="tool", content="\n evidence \n")]
+        prompt = tokenizer.apply_chat_template(messages)
+        start = prompt.index("evidence")
+        end = start + len("evidence")
+        encoded = encode_prompt(tokenizer, messages, beacon=True)
+        self.assertEqual(encoded["input_ids"], encode_prompt(tokenizer, messages)["input_ids"])
+        offsets = tokenizer(prompt)["offset_mapping"]
+        expected = [i for i, (left, right) in enumerate(offsets) if start <= left < right <= end]
+        actual = [i for a, b in encoded["regions"] for i in range(a, b)]
+        self.assertTrue(actual)
+        self.assertEqual(actual, expected)
+
     def test_region_mapping_excludes_tokens_crossing_a_tool_boundary(self):
         class MergedTokenizer(Tokenizer):
             def encode(self, text, **options):
