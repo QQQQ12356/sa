@@ -121,8 +121,9 @@ def evaluate(*, method, benchmark, benchmark_dir, training_run, model_path, prom
         raise ValueError("不支持的 benchmark")
     dataset_name, training_run, model, kind, origin = resolve_target(method, training_run, model_path, checkpoint)
     spec = read_json(training_run / "experiment.json") if training_run else {}
-    shared_prompt = (benchmark == "browsecomp-plus"
-                     and generation.get("prompt_profile") in {"benchmark", "qwen-native"})
+    profile = generation.get("prompt_profile")
+    shared_prompt = (benchmark == "browsecomp-plus" and profile in {"benchmark", "qwen-native"}
+                     or benchmark == "hotpotqa" and profile == "benchmark")
     if shared_prompt and prompt_data:
         raise ValueError("SA_PROMPT_DATA requires the training prompt profile")
     if dataset_name == "mixed" and not shared_prompt and not prompt_data:
@@ -282,15 +283,26 @@ def _browsecomp_plus_judge_options(judge):
     return judge
 
 
-def run_browsecomp_plus(*, method, benchmark_dir, training_run=None, model_path=None, checkpoint=None,
-                        prompt_data, run_name, overlap="off", overlap_threshold=0.30, resume_from,
-                        evaluation_dir, score_after_generation, generation, judge, environment):
+def run_browsecomp_plus(**options):
+    return run_offline_benchmark(benchmark="browsecomp-plus", **options)
+
+
+def run_offline_benchmark(*, method, benchmark, benchmark_dir, training_run=None, model_path=None,
+                          checkpoint=None, prompt_data, run_name, overlap="off", overlap_threshold=0.30,
+                          resume_from, evaluation_dir, score_after_generation, generation, judge, environment):
     """Generate and score one run, or run either stage on its own."""
-    benchmark = "browsecomp-plus"
+    if benchmark not in {"browsecomp-plus", "hotpotqa"}:
+        raise ValueError("unsupported offline benchmark")
     if method not in {"baseline", "plain", "beacon"}:
         raise ValueError("method must be baseline, plain or beacon")
     if evaluation_dir or score_after_generation:
-        judge = _browsecomp_plus_judge_options(judge)
+        if benchmark == "browsecomp-plus":
+            judge = _browsecomp_plus_judge_options(judge)
+        elif judge["llm_judge"]:
+            if not judge["judge_model"] or not path(judge["judge_model"]).is_dir():
+                raise ValueError("HotpotQA LLM judging requires SA_JUDGE__JUDGE_MODEL to point to a directory")
+        else:
+            judge = dict(judge, judge_model=None)
 
     if not evaluation_dir:
         if method == "baseline":
@@ -308,7 +320,7 @@ def run_browsecomp_plus(*, method, benchmark_dir, training_run=None, model_path=
             if (config.get("model_type") not in {"qwen3_5", "qwen3_5_text"}
                     or (text.get("hidden_size"), text.get("intermediate_size"),
                         text.get("num_hidden_layers")) != (2560, 9216, 32)):
-                raise ValueError("BrowseComp-Plus requires a Qwen3.5-4B backbone")
+                raise ValueError(f"{benchmark} requires a Qwen3.5-4B backbone")
         evaluation_dir = evaluate(method=method, benchmark=benchmark, benchmark_dir=benchmark_dir,
                                   training_run=training_run, model_path=model_path, checkpoint=checkpoint,
                                   prompt_data=prompt_data, run_name=run_name, generation=generation,
@@ -318,5 +330,5 @@ def run_browsecomp_plus(*, method, benchmark_dir, training_run=None, model_path=
             return evaluation_dir
     score_dir = score(method=method, benchmark=benchmark, evaluation_dir=evaluation_dir,
                       run_name="judge", judge=judge, environment=environment)
-    print(f"BrowseComp-Plus summary: {score_dir / 'results/summary.metrics.json'}", flush=True)
+    print(f"{benchmark} summary: {score_dir / 'results/summary.metrics.json'}", flush=True)
     return score_dir

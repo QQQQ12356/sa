@@ -62,3 +62,5 @@ bash scripts/plain/sh/46_run_browsecomp_plus.sh
 ```
 
 两终端均激活 cu126 环境。需要评分时设置 `SA_SCORE_AFTER_GENERATION=true`，也可以填 `SA_EVALUATION_DIR` 单独对已有结果评分。[32 vLLM 部署、全部生成参数和评分配置](32_browsecomp_plus_vllm.md)
+
+HotpotQA 使用同方法的 `scripts/plain/sh/47_run_hotpotqa.sh`。填写训练实验、HotpotQA 数据版本，先运行 `serve 8040`，再直接运行该脚本生成或评分。[37 HotpotQA 命令、参数和评分](37_hotpotqa_vllm.md)

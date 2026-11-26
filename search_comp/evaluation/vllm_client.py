@@ -1,4 +1,4 @@
-"""Send Qwen-native token prompts to method-owned local vLLM replicas."""
+"""Send tokenized prompts to method-owned local vLLM replicas."""
 
 import os
 from pathlib import Path
@@ -27,7 +27,7 @@ def served_name(origin):
 
 
 class VllmClient:
-    def __init__(self, http, url, model_path, origin, options, max_context):
+    def __init__(self, http, url, model_path, origin, options, max_context, *, tool_protocol="qwen-native"):
         self.http = http
         self.url = url
         self.model = served_name(origin)
@@ -37,7 +37,7 @@ class VllmClient:
             seed=options.get("seed", 42),
         )
         self.metadata = dict(backend="vllm", checkpoint=model_path, model_origin=origin,
-                             tool_protocol="qwen-native", served_model=self.model,
+                             tool_protocol=tool_protocol, served_model=self.model,
                              **self.sampling)
         cards = self.request("GET", "models").json()["data"]
         card = next((card for card in cards if card["id"] == self.model), None)
@@ -57,11 +57,17 @@ class VllmClient:
     def start_question(self, question):
         pass
 
-    def __call__(self, inputs, budget, *, stop_texts):
+    def __call__(self, inputs, budget, *, stop_texts=None):
         import httpx
 
+        include_stop = stop_texts is None
+        if include_stop:
+            from search_comp.data.openseeker import CALL_END
+
+            stop_texts = (CALL_END, "</answer>")
         body = dict(model=self.model, prompt=inputs["input_ids"], max_tokens=budget,
-                    stop=list(stop_texts), skip_special_tokens=False, **self.sampling)
+                    stop=list(stop_texts), include_stop_str_in_output=include_stop,
+                    skip_special_tokens=False, **self.sampling)
         for attempt in range(3):
             try:
                 result = self.request("POST", "completions", json=body).json()
@@ -73,4 +79,5 @@ class VllmClient:
                 if attempt == 2:
                     raise
         choice = result["choices"][0]
-        return choice["text"], choice["finish_reason"] != "length", result["usage"]["completion_tokens"]
+        text = choice["text"].removesuffix("<|im_end|>")
+        return text, choice["finish_reason"] != "length", result["usage"]["completion_tokens"]

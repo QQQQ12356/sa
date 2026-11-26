@@ -45,7 +45,7 @@ uv pip install --python .venv-vllm/bin/python --torch-backend=auto -r requiremen
 .venv-vllm/bin/python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())'
 ```
 
-`--torch-backend=auto` 根据 NVIDIA 驱动选择 PyTorch 源，还需确认所装 vLLM wheel 的 CUDA 版本满足驱动与 GPU 要求。若当前 Linux 主机只能支撑 cu126，先为服务准备兼容的驱动和 wheel，再执行 [32 号流程](32_browsecomp_plus_vllm.md)。训练和检索仍可继续使用原环境。也可用 `SA_VLLM_BIN=/path/to/venv/bin/vllm` 指定已有兼容服务环境。
+`--torch-backend=auto` 根据 NVIDIA 驱动选择 PyTorch 源，还需确认所装 vLLM wheel 的 CUDA 版本满足驱动与 GPU 要求。若当前 Linux 主机只能支撑 cu126，先为服务准备兼容的驱动和 wheel。也可用 `SA_VLLM_BIN=/path/to/venv/bin/vllm` 指定已有兼容服务环境。训练和检索仍使用 cu126 环境。 [32 BrowseComp-Plus](32_browsecomp_plus_vllm.md) · [37 HotpotQA](37_hotpotqa_vllm.md)
 
 ## 3. 运行时环境变量
 

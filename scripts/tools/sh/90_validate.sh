@@ -15,7 +15,7 @@ cd -- "$PROJECT_ROOT"
 export SA_RUN_UNIT_TESTS=true
 
 # TEST_PATTERNS：无模型检查的文件名模式列表；Excel 文件验证需要 requirements.tools-export.txt。
-export SA_TEST_PATTERNS='["test_experiment_contracts.py", "test_research_sft.py", "test_training_benchmark_matrix.py", "test_hotpot_judge.py", "test_shell_config.py", "test_export_benchmark_excel.py"]'
+export SA_TEST_PATTERNS='["test_experiment_contracts.py", "test_research_sft.py", "test_training_benchmark_matrix.py", "test_hotpot_judge.py", "test_shell_config.py", "test_beacon_evaluation.py", "test_export_benchmark_excel.py"]'
 
 # ===== 内部身份与单次 Python 调用；无需修改 =====
 export SA_ENTRY=tools/90_validate

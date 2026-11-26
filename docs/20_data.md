@@ -155,6 +155,8 @@ bash scripts/data/sh/32_prepare_hotpotqa.sh
 
 使用 fullwiki dev 题目与独立维基摘要语料，校验官方语料 MD5。程序不会将题目提供的候选 context 作为检索语料，也不会将答案或 supporting facts 注入模型提示词。本地小语料结果会标记为非正式全量语料。
 
+`SA_VERSION` 决定写入 `artifacts/benchmarks/hotpotqa/<版本>/` 的目录名。完成索引后，把该目录填入 [三种方法各自的 47 号脚本](37_hotpotqa_vllm.md)。修改 `SA_TITLE_WEIGHT` 建索引时，评测的 `SA_GENERATION__TITLE_WEIGHT` 使用相同值。
+
 ## 10. 复用规则
 
 三种方法共享同一 benchmark 版本，保证题目、语料和索引一致。数据目录禁止覆盖；操作失败后保留日志，原始下载可重试，部分 prepared/index 建议保留后改用新版本重建。进入训练与测试前，把生成的准确目录填入方法脚本。

@@ -38,7 +38,7 @@
 | 输出蒸馏 | `beacon_output_distill_weight`、teacher 参数 | 大于 0 会额外加载 teacher；预留内存与显存 |
 | 显存优化 | `beacon_checkpoint_blocks`、`beacon_checkpoint_loss`、CPU offload | 训练默认开启；不用普通 gradient_checkpointing 代替 |
 
-逐项默认值和字段说明见 [60 参数手册](60_parameters.md)。Beacon 多卡训练支持 DDP 和 ZeRO-2。评测默认使用 `greedy`，设置 `SA_GENERATION__DECODING=sample` 可启用按题设种子的采样，并用 `SA_GENERATION__TEMPERATURE` 和 `SA_GENERATION__TOP_P` 调整采样。
+逐项默认值和字段说明见 [60 参数手册](60_parameters.md)。Beacon 多卡训练支持 DDP 和 ZeRO-2。推荐 46/47 评测入口默认使用 `sample`；旧入口默认 `greedy`。设置 `SA_GENERATION__DECODING=sample` 可启用按题设种子的采样，并用 `SA_GENERATION__TEMPERATURE` 和 `SA_GENERATION__TOP_P` 调整采样。
 
 ## 4. 校验计划与训练
 
@@ -60,49 +60,37 @@ bash scripts/beacon/sh/11_train_research.sh
 
 ## 5. 配置测试
 
-Qwen3.5-4B 的 BrowseComp-Plus 完整评测入口是 `scripts/beacon/sh/46_run_browsecomp_plus.sh`。先按 [数据准备](20_data.md#8-准备-browsecomp-plus) 建索引，再填写所选权重与检索设置。
+正式对照实验使用下面两个统一入口，完整生成、评分与参数说明集中在对应评测文档。
 
-46 号入口可一起生成与评分。单独生成和评分时使用下方对应脚本。分别修改以下参数。
-
-- `SA_TRAINING_RUN`：同方法的训练实验根目录，Research 实验位于 `beacon/research/`。
-- `SA_CHECKPOINT`：默认留空测试成功训练的最终模型。填 `checkpoint-200` 或同实验内该目录完整路径测试周期检查点。
-- `SA_BENCHMARK_DIR`：公共准备脚本产生的准确版本目录。
-- `SA_RUN_NAME`：正式全量可用 `full`；小样本可用 `smoke`。
-- `GENERATION`：先用正数 `limit` 验证流程，正式结果改为 `-1`。调整上下文、每轮输出、工具预算等参数时各方法保持可比较设置。
-
-`SA_MODEL_PATH` 和 `SA_PROMPT_DATA` 留空。模型来源和提示词从所属实验解析。显式选择周期检查点时，可以对运行中或失败的正式训练使用已经保存完整的检查点。文件要求、配置示例和排错见 [33 检查点测试](33_checkpoint_evaluation.md)。
-
-| Benchmark | 测试入口 | 执行条件 |
+| Benchmark | 推荐入口 | 共享行为 |
 |---|---|---|
-| BrowseComp | `scripts/beacon/sh/40_test_browsecomp.sh` | 题目与固定版工具已准备，在线搜索/访问环境可用 |
-| BrowseComp-Plus | `scripts/beacon/sh/42_test_browsecomp_plus.sh` | 全量语料、prepared 和索引已准备，完全离线 |
-| HotpotQA | `scripts/beacon/sh/44_test_hotpotqa.sh` | fullwiki 题目、独立维基语料和索引已准备，完全离线 |
+| BrowseComp-Plus | `scripts/beacon/sh/46_run_browsecomp_plus.sh` | [32 评测说明](32_browsecomp_plus_vllm.md)：与 Baseline/Plain 使用相同 Qwen 原生浏览器、BM25/向量检索和预算 |
+| HotpotQA | `scripts/beacon/sh/47_run_hotpotqa.sh` | [37 评测说明](37_hotpotqa_vllm.md)：统一 benchmark 提示词、BM25、答案/支持事实指标 |
+
+填写 `SA_TRAINING_RUN`；`SA_CHECKPOINT` 留空使用成功训练的最终模型，或填写同实验的 `checkpoint-200`。周期检查点也可来自运行中或失败的正式训练，文件完整性要求见 [33 检查点](33_checkpoint_evaluation.md)。`SA_PROMPT_DATA` 在推荐提示词下留空。混合训练实验也能直接使用推荐提示词。
 
 ```bash
-bash scripts/beacon/sh/40_test_browsecomp.sh
-bash scripts/beacon/sh/42_test_browsecomp_plus.sh
-bash scripts/beacon/sh/44_test_hotpotqa.sh
+bash scripts/beacon/sh/46_run_browsecomp_plus.sh
+bash scripts/beacon/sh/47_run_hotpotqa.sh
 ```
 
-每项生成一个独立测试目录。在线测试默认逐题运行；离线 `num_workers>1` 时每张可见卡加载一个完整模型副本。下表中的生成入口只写预测。46 号入口的 `SA_SCORE_AFTER_GENERATION` 控制是否接着评分，`SA_JUDGE__JUDGE_BACKEND` 在 local 与 openai 之间选择。
+Beacon 使用本地模型与 fast tokenizer，通过原生模板定位工具正文的 token 区间，仅压缩这些区间。问题、system、assistant 推理、工具调用和协议边界保留。BM25 与向量模式使用相同区域标记。`SA_GENERATION__NUM_WORKERS` 是本地模型副本数，每张可见 GPU 加载一份模型；不使用 vLLM `serve`。
 
-## 6. 独立评分
+首次将 `LIMIT` 设为 1–5；正式运行改 `-1`。默认 `SCORE_AFTER_GENERATION=false` 只生成，可独立安排裁判资源。跨方法请固定相同题集、日期、预算、检索器和观测窗口；压缩配置取自所选权重。
 
-将各项测试目录分别填入对应评分脚本的 `SA_EVALUATION_DIR`，目录应包含 `evaluation.json` 与 `results/`。不要填预测文件或训练目录。
+## 6. 评分与兼容入口
 
-| Benchmark | 评分入口 | 裁判配置 |
+46/47 均支持三种模式：`EVALUATION_DIR` 为空时生成；同时启用 `SCORE_AFTER_GENERATION=true` 时接着评分；填写同方法同 benchmark 的成功测试根目录时只评分。题集和 limit 自动沿用原测试，结果写入新的 `scores/` 子目录。BrowseComp-Plus 支持 local/openai 裁判；HotpotQA 默认只算官方指标，可额外开启本地语义裁判。详细参数见对应评测文档与 [60 参数](60_parameters.md)。
+
+保留以下入口用于在线任务或复现旧实验。旧协议与推荐原生浏览器协议不同，请分别记录结果，续测时沿用原入口及原配置。
+
+| 用途 | 生成 | 独立评分 |
 |---|---|---|
-| BrowseComp | `scripts/beacon/sh/41_score_browsecomp.sh` | 服务器环境 `SCORER_*`；脚本 `JUDGE` 配置并发、重试、预算 |
-| BrowseComp-Plus | `scripts/beacon/sh/43_score_browsecomp_plus.sh` | `SA_JUDGE__JUDGE_MODEL` 填本地裁判目录 |
-| HotpotQA | `scripts/beacon/sh/45_score_hotpotqa.sh` | 默认本地 LLM judge + 官方 EM/F1；本地裁判目录必填 |
+| 在线 BrowseComp | `40_test_browsecomp.sh` | `41_score_browsecomp.sh` |
+| 旧 BrowseComp-Plus 工具协议 | `42_test_browsecomp_plus.sh` | `43_score_browsecomp_plus.sh` |
+| 旧 HotpotQA 训练提示词 | `44_test_hotpotqa.sh` | `45_score_hotpotqa.sh` |
 
-```bash
-bash scripts/beacon/sh/41_score_browsecomp.sh
-bash scripts/beacon/sh/43_score_browsecomp_plus.sh
-bash scripts/beacon/sh/45_score_hotpotqa.sh
-```
-
-评分沿用测试的 benchmark 版本和 `limit`，核对方法、预测和 manifest 摘要。新的裁判设置创建新的评分目录，原结果保留。指标位于 `scores/<评分记录>/results/summary.metrics.json`。失败/缺失生成保持在分母内；裁判不完整会报错，不能将部分分数当作完成结果。
+这些文件均位于 `scripts/beacon/sh/`。在线环境见 [11 摘要服务](11_sglang_summary.md)。旧 43 使用本地裁判目录，旧 45 默认开启本地语义裁判；统一 47 默认关闭语义裁判。评分失败/缺失生成保持在分母内；不完整裁判不能作为完整成绩。续测与中断恢复见 [36](36_browsecomp_plus_resume.md)。
 
 ## 7. 归档与排查
 

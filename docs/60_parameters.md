@@ -6,7 +6,7 @@
 
 - `ENVIRONMENT` 先应用到进程环境，再导入 tokenizer/模型/Hub 客户端。
 - `TRAINING`、`BEACON`、`DISTRIBUTED` 为当前文件的完整训练配置，由对应 SA_* 环境变量还原，不继承另一方法配置。
-- Plain 和 Beacon 从 `TRAINING_RUN` 读取模型来源，可用 `CHECKPOINT` 选择训练步数。Baseline 使用本地 `MODEL_PATH`。Baseline/Plain 的 vLLM、Qwen 原生提示词和生成参数见 [32 评测手册](32_browsecomp_plus_vllm.md)。
+- Plain 和 Beacon 从 `TRAINING_RUN` 读取模型来源，可用 `CHECKPOINT` 选择训练步数。Baseline 使用本地 `MODEL_PATH`。Baseline/Plain 的 vLLM 参数分别见 [32 BrowseComp-Plus](32_browsecomp_plus_vllm.md) 和 [37 HotpotQA](37_hotpotqa_vllm.md)。
 - 评分的 benchmark 版本和 `limit` 来自 `EVALUATION_DIR`，避免评分与生成范围不一致。
 - 相对路径均以项目根目录解析；模型 tokenizer 身份必须使用预处理时相同的字符串。不要使用 Windows 盘符路径。
 
@@ -33,12 +33,15 @@ benchmark 评分后的 Excel 导出使用 `scripts/tools/sh/82_benchmark_excel.s
 | TRAINING_RUN | Plain/Beacon 同方法的训练实验根目录。使用最终模型时该实验须成功完成。Baseline 留空。 |
 | CHECKPOINT | Plain/Beacon 测试专用，实际变量为 `SA_CHECKPOINT`。默认留空使用最终模型，也可填 `checkpoint-200` 或同实验中该目录完整路径。详见 [33 检查点测试](33_checkpoint_evaluation.md)。 |
 | BENCHMARK_DIR | 准备好的共享 benchmark 版本目录。 |
-| PROMPT_DATA | 使用训练提示词的 Beacon 混合实验填写具有统一 system 和工具定义的规范化 JSONL。 |
+| PROMPT_DATA | Beacon 旧 training/legacy 协议下用于指定训练提示词。推荐 46 的 qwen-native 与 47 的 benchmark 均留空。 |
+| EVALUATION_DIR | 成功测试根目录，含 job.json、evaluation.json、results/；填写后只评分，题集与 limit 沿用原记录。 |
+| RESUME_FROM | 已成功完成的同方法评测目录。LIMIT 为累计目标题数；新任务复用原预测并写入新目录。 |
+| SCORE_AFTER_GENERATION | 46/47 默认 false，仅生成；true 在生成完成后评分。EVALUATION_DIR 非空时总是只评分。 |
+| OVERLAP / OVERLAP_THRESHOLD | 46 的训练重合筛选 off/filter 及匹配阈值（默认 0.30）；推荐 off 保留共同题集。HotpotQA 47 不使用。 |
 
 混合数据脚本 `24_mix_datasets.sh` 的父目录、比例、seed 和长度参数见 [混合 OpenSeeker 与 Research](20_data.md#5-可选混合-openseeker-与-research)。
 
 BrowseComp SFT 的下载、预处理变量及测试前的 `SA_OVERLAP`、`SA_OVERLAP_THRESHOLD` 见 [BrowseComp SFT 数据接入](21_browsecomp_sft.md)。
-| EVALUATION_DIR | 成功测试目录，含 job.json、evaluation.json、results/；不能填单个预测文件。 |
 
 在线页面读取与总结的 ENVIRONMENT 字段：`SUMMARY_ATTEMPTS` 为有限重试次数（1–10，默认 3）；`SUMMARY_MAX_INPUT_CHARS` 为总结输入字符上限（40000）；`SUMMARY_MAX_TOKENS` 为总结输出 token 上限（2048）；`SUMMARY_TIMEOUT` 为总结超时秒数（120）；`JINA_TIMEOUT` 为页面读取超时秒数（50）。`SUMMARY_API_URL` 和 `SCORER_URLS` 填基础地址如 `http://host:8000/v1`，客户端追加 `/chat/completions`。
 
@@ -73,42 +76,58 @@ BrowseComp SFT 的下载、预处理变量及测试前的 `SA_OVERLAP`、`SA_OVE
 
 ## 4. GENERATION 推理参数
 
-| 字段 | 适用范围 | 默认值 | 作用与修改提示 |
-|---|---|---|---|
-| limit | 全部 | -1 | -1 全量，正数取源顺序前 N 条；小样本不能当全量成绩。 |
-| max_context | 全部 | 131072 | 单问题完整序列上下文预算；应符合模型能力和显存。 |
-| max_new_tokens | 全部 | 8192 | 每轮 assistant 生成上限，实际还受剩余上下文限制。 |
-| max_turns | 全部 | 200 | Agent 最大生成轮数。 |
-| max_tool_tokens | 全部 | 32768 | 单条工具返回编码长度上限；超限终止，不截断观测。 |
-| tool_count | 全部 | 200 | 每题工具调用对象数量上限；批量 query 仍属于一个 search 调用。 |
-| tool_call_retries | 全部 | 1 | 工具调用格式非法时允许的修正次数，不重试真实工具失败。 |
-| decoding | 全部 | greedy | 支持 greedy 和 sample。 |
-| repetition_penalty | 全部 | 1.0 | 重复惩罚，正有限值；1.0 不施加额外惩罚。 |
-| temperature | 全部 | 1.0 | sample 时的正温度；greedy 不采样。 |
-| top_p | 全部 | 1.0 | sample 的 nucleus 概率阈值，范围 (0,1]。 |
-| generation_seed | 全部 | 42 | 推理随机种子；对 sample 有意义。 |
-| num_workers | 离线 | 1 | 每 GPU 一个完整模型副本；不要与训练 NPROC 混淆。 |
-| title_weight | 离线 | 1.0 | 必须与已建索引的标题权重一致。 |
-| verify_index | 离线 | True | 启动时扫描索引摘要，增加大索引读取时间。 |
-| topk | 离线 | 5 | 每条查询返回的最高排名文档数，正整数。 |
-| snippet_tokens | 离线 | 512 | 每篇搜索结果的正文摘录 token 上限。 |
-| read_tokens | 离线 | 4096 | visit 读取本地文档的正文 token 上限。 |
-| allow_visit | 离线 | True | 是否允许本地 visit；False 采用 search-only 提示词。 |
+下表以三种方法的推荐 46/47 入口为准。实际变量为 `SA_GENERATION__<大写字段>`。旧 Beacon 40/42/44 的默认值可能不同，以对应 SH 为准。采样 seed 用于可重复设置，不保证 vLLM 与本地 Beacon 产生相同 token 序列。
 
-BrowseComp 使用固定版工具与 stable 页面读取策略，原生生成逐题执行；在线工具服务的检索数量由其自身协议决定，不暴露离线 topk 参数。
+| 字段 | 类型 / 默认 | 含义与约束 |
+|---|---|---|
+| prompt_profile | str；BCP=qwen-native，HotpotQA=benchmark | BCP 共享 Qwen 模板及 browser.search/open/find；HotpotQA 共享 search/visit。Baseline/Plain 自动设定；Beacon 可选旧协议复现 |
+| prompt_date | optional；空 | 仅原生 BCP，YYYY-MM-DD；空值用运行日，续测沿用原日期。跨方法请显式设相同日期 |
+| limit | int；-1 | -1 全量；正数取筛选后题集前 N 题；0 不合法；续测表示累计题数 |
+| max_context | int；BCP=131072，HotpotQA=32768 | 每轮输入加输出 token 上限。Beacon 同样按压缩前输入检查，不因压缩扩大题目预算 |
+| max_new_tokens | int；8192 | 单轮 assistant 输出 token 上限，还受剩余 max_context 限制 |
+| max_turns | int；200 | 每题最多 assistant 生成轮数，包含思考与工具调用轮次 |
+| tool_count | int；BCP=4096，HotpotQA=200 | 每题工具调用对象预算。原生协议将 query 列表拆成多次 search 并分别计数；旧 search 协议的批量 query 为一个对象 |
+| decoding | str；sample | greedy 确定性解码或 sample 采样 |
+| repetition_penalty | float；1.0 | 正有限值，1.0 无额外惩罚；Beacon 对当前可见 token 应用惩罚 |
+| temperature | float；1.0 | sample 采样温度，须正且有限；greedy 忽略采样温度 |
+| top_p | float；1.0 | sample 的累积概率阈值，范围 (0,1] |
+| generation_seed | int；42 | [0, 2147483647]；本地模型按题目文本派生采样种子，vLLM 请求携带固定 seed |
+| observation_window | int；0 | 仅 BCP；0 保留全部工具轮次，正整数保留最近 N 个成功工具轮次，旧观测用占位替换；完整轨迹保存 |
+| num_workers | int；1 | Beacon 本地 GPU 模型副本数，每卡一份。Baseline/Plain 使用 vLLM，并发参数见下表 |
+| retriever | str；bm25 | 仅 BCP，bm25 或 qwen3-embedding-8b；HotpotQA 47 固定 SQLite BM25 |
+| vector_index_dir | optional；空 | dense 必填：官方分片快照根目录或转换/自编码索引目录；必须匹配 benchmark 语料 |
+| embedding_model_path | optional；空 | dense 必填：索引清单对应的本地 Qwen3-Embedding-8B commit 目录 |
+| embedding_device | str；cuda:0 | dense 查询编码设备，编号相对 CUDA_VISIBLE_DEVICES；可设 cpu，注意速度与内存 |
+| title_weight | float；1.0 | 仅 SQLite BM25 的标题权重，须与建索引一致。官方 Lucene 和 dense 不使用 |
+| verify_index | bool；true | 启动时扫描索引 SHA256；false 省略大文件扫描，仍检查清单与来源 |
+| topk | int；BCP=15，HotpotQA=5 | 每次查询默认返回文档数，须正数；原生 browser 调用可通过工具参数覆盖 |
+| max_tool_tokens | int；32768 | HotpotQA/旧 Beacon 协议的单条工具返回 token 上限，超限终止；原生 BCP 不使用 |
+| tool_call_retries | int；1 | HotpotQA/旧协议的格式错误修正次数，非负；不重试真实工具错误，原生 BCP 不使用 |
+| snippet_tokens | int；512 | HotpotQA/旧协议的每篇搜索摘录 token 上限；原生 BCP 使用摘要高亮和浏览器参数 |
+| read_tokens | int；4096 | HotpotQA/旧协议的每篇 visit 正文 token 上限；原生 BCP 使用 open 参数 |
+| allow_visit | bool；true | HotpotQA/旧协议是否启用 visit；原生 BCP 固定提供 search/open/find |
+
+| vLLM 字段（仅 Baseline/Plain） | 类型 / 默认 | 含义 |
+|---|---|---|
+| vllm_urls | str；脚本预设本机端口 | 逗号分隔的本机 http://127.0.0.1:PORT/v1；每个地址对应已启动的服务 |
+| vllm_concurrency | int；32 | 每副本并发题数，须正数；不同题的浏览器和轨迹隔离 |
+| vllm_timeout | float；300 | 单次请求超时秒数，须正且有限 |
+
+服务端环境变量 `SA_VLLM_BIN`、`SA_VLLM_GPU_MEMORY`、`SA_VLLM_TP` 和端口说明见 [32](32_browsecomp_plus_vllm.md) / [37](37_hotpotqa_vllm.md)。Beacon 本地压缩配置由训练权重读取，不通过上述服务变量配置。在线 BrowseComp 使用上游工具，逐题执行，离线检索参数不适用。
 
 ## 5. JUDGE 裁判参数
 
-下表适用于 Beacon 的独立评分入口。各方法的 BrowseComp-Plus 46 号入口支持本地和 OpenAI 裁判，参数见 [32 评分](32_browsecomp_plus_vllm.md#4-评分与结果)。
+下表涵盖三种方法的 46/47 及 Beacon 旧独立评分入口。完整工作流见 [32 评分](32_browsecomp_plus_vllm.md#4-评分与结果)。
 
 | 字段 | 适用范围 | 作用与修改提示 |
 |---|---|---|
-| judge_model | 离线 | 本地裁判目录，默认占位 /models/judge，执行前必改；不能填在线端点。 |
-| llm_judge | HotpotQA | 默认 True，加语义裁判；需要本地 judge_model。仅算官方 EM/F1 时同时设 False 和 judge_model=''。 |
+| judge_backend / judge_url | BCP 46 | local/openai 及 OpenAI 兼容基础地址；默认 openai、https://api.openai.com/v1。远程模式从环境读取 OPENAI_API_KEY，本地模式不使用 URL。 |
+| judge_model | 离线 | local 时填本地目录；BCP openai 时填服务模型名（默认 gpt-5-mini）。HotpotQA 默认关闭语义裁判，模型留空。 |
+| llm_judge | HotpotQA | 开启时加本地语义裁判。Beacon 45 默认为 true，三种方法的统一 47 默认为 false。 |
 | judge_workers | BrowseComp | 远程裁判并发数，默认 1。 |
 | judge_attempts | 全部 | 最多尝试次数，默认 3；解析失败仍保留错误状态和分母。 |
 | judge_max_tokens | 全部 | 每次裁判输出预算；在线默认 1024，离线默认 4096。 |
-| judge_timeout | BrowseComp | 单次在线请求超时秒数，默认 120。 |
+| judge_timeout | BrowseComp / BCP 46 | 单次裁判请求超时秒数，默认 120，正且有限。 |
 | judge_enable_thinking | 全部 | 是否允许 thinking，默认 False；与裁判兼容性一致。 |
 | judge_max_context | 离线 | 本地裁判上下文上限，默认 32768。 |
 | judge_temperature | 离线 | 裁判采样温度，默认 0。 |

@@ -58,12 +58,12 @@
 - 单独训练复用 Plain 或 Beacon 的 `11_train_research.sh`。设置 `SA_DATASET_NAME=browsecomp-sft`，`SA_DATASET_DIR` 指向所选 prepared 版本。实验归档到 `artifacts/experiments/<方法>/browsecomp-sft/`。
 - 旧版写在 `artifacts/datasets/research/prepared/` 的 BrowseComp SFT 产物可继续使用。新训练使用 `SA_DATASET_NAME=browsecomp-sft`，旧训练实验可继续从原目录评测。保留旧实验引用的文件路径。
 - 混合时使用 `24_mix_datasets.sh`。把 SFT 目录填入 `SA_BROWSECOMP_SFT_PREPARED`。任选两个或三个来源，空目录对应的比例项省略。与 OpenSeeker 两路混合时清空 `SA_RESEARCH_PREPARED`，比例例如 `1:1`。三路顺序为 OpenSeeker:Research:BrowseComp SFT，例如 `2:1:1`。混合仍优先保留高优先级的同题划分，按 `test > validation > train` 排除低优先级副本。
-- 使用混合训练产物时，将训练脚本的 `SA_DATASET_NAME` 设为 `mixed`。测试脚本中的 `SA_PROMPT_DATA` 选一个与评测工具能力匹配、仅含一种 system/tools 组合的规范化 JSONL。单独训练但同时纳入两个 SFT 分片时，同样可用此变量显式选择一种提示词。
+- 使用混合训练产物时，将训练脚本的 `SA_DATASET_NAME` 设为 `mixed`。使用旧训练提示词评测时，测试脚本中的 `SA_PROMPT_DATA` 选一个与评测工具能力匹配、仅含一种 system/tools 组合的规范化 JSONL。单独训练但同时纳入两个 SFT 分片时，同样可用此变量显式选择一种提示词。
 - 预处理结束先检查 `manifest.json` 的输入文件指纹、题目参考文件指纹、计长分布与划分数量。查看 `rejected.jsonl` 的 `protected_question`、`unresolved_benchmark_question` 和工具格式错误，确认训练集非空后再启动训练。
 
 ## BrowseComp 与 BrowseComp-Plus 测试前筛选
 
-Beacon 的 40 和 42 默认启用筛选。Plain 在 46 中设置 `SA_OVERLAP=filter` 后启用。测试从训练实验读取实际 `train.jsonl`，验证其训练时记录的 SHA256，在生成前排除重合题。训练版本和官方题文件需要保留在实验记录所指路径。
+推荐 46/47 使用统一 benchmark 提示词，`SA_PROMPT_DATA` 留空。Beacon 的旧 40 和 42 默认启用筛选，统一 46 默认关闭。Plain 在 46 中设置 `SA_OVERLAP=filter` 后启用。测试从训练实验读取实际 `train.jsonl`，验证其训练时记录的 SHA256，在生成前排除重合题。训练版本和官方题文件需要保留在实验记录所指路径。
 
 | SH 变量 | 作用和修改提示 |
 |---|---|

@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from search_comp.experiments.browsecomp_plus_entry import launch, launcher_schema
+from search_comp.experiments.offline_entry import launch, launcher_schema
 
 SCHEMA = launcher_schema("baseline")
 

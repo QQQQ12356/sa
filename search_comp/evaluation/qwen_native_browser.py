@@ -87,6 +87,52 @@ def parse_assistant(text, turn):
     return message
 
 
+
+def encode_prompt(tokenizer, messages, *, beacon=False):
+    """Keep native tokens intact and compress only actual tool message bodies.
+
+    Placeholder rendering locates tool messages without mistaking user or
+    assistant text for observations. Tokens crossing body edges stay visible.
+    """
+    options = dict(tools=list(TOOLS), tokenize=False, add_generation_prompt=True,
+                   save_history_reasoning_content=True)
+    prompt = tokenizer.apply_chat_template(messages, **options)
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    encoded = {"input_ids": ids}
+    if not beacon:
+        return encoded
+    bodies = [message["content"] for message in messages if message["role"] == "tool"]
+    encoded["regions"] = []
+    if not bodies:
+        return encoded
+    marker = "BEACON_TOOL_BODY"
+    while marker in prompt:
+        marker += "_"
+    markers = iter(f"{marker}_{index}_END" for index in range(len(bodies)))
+    masked = [dict(message, content=next(markers)) if message["role"] == "tool" else message
+              for message in messages]
+    template = tokenizer.apply_chat_template(masked, **options)
+    chunks = re.split(f"{marker}_[0-9]+_END", template)
+    if len(chunks) != len(bodies) + 1:
+        raise ValueError("native chat template must preserve tool message bodies")
+    rebuilt, spans = chunks[0], []
+    for body, chunk in zip(bodies, chunks[1:]):
+        spans.append((len(rebuilt), len(rebuilt) + len(body)))
+        rebuilt += body + chunk
+    if rebuilt != prompt:
+        raise ValueError("native chat template changed tool body rendering")
+    tokens = tokenizer(prompt, add_special_tokens=False, return_offsets_mapping=True)
+    if tokens["input_ids"] != ids:
+        raise ValueError("native tokenizer offset mapping changed prompt token IDs")
+    offsets = tokens["offset_mapping"]
+    for start, end in spans:
+        interior = [i for i, (left, right) in enumerate(offsets)
+                    if start <= left < right <= end]
+        if interior:
+            encoded["regions"].append((interior[0], interior[-1] + 1))
+    return encoded
+
+
 def run_agent(messages, tokenizer, generate, browser, *, max_turns, max_context, max_new_tokens,
               observation_window):
     full = list(messages)
@@ -109,17 +155,14 @@ def run_agent(messages, tokenizer, generate, browser, *, max_turns, max_context,
                     + (", ".join(f"{key}={value!r:.80}" for key, value in function["arguments"].items())
                        or "no args")))
                 masked += 1
-        prompt = tokenizer.apply_chat_template(
-            context, tools=list(TOOLS), tokenize=False, add_generation_prompt=True,
-            save_history_reasoning_content=True,
-        )
-        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        encoded = encode_prompt(tokenizer, context, beacon=getattr(generate, "beacon", False))
+        ids = encoded["input_ids"]
         budget = min(max_new_tokens, max_context - len(ids))
         if budget <= 0:
             status = "context_limit"
             break
         start = time.monotonic()
-        text, _, tokens = generate({"input_ids": ids}, budget,
+        text, _, tokens = generate(encoded, budget,
                                    stop_texts=("\n<tool_response>", "<tool_response>", "<|im_end|>"))
         stats.append(dict(round=turn, input_tokens=len(ids), output_tokens=tokens,
                           latency_s=time.monotonic() - start))

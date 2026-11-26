@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一次运行生成和评分。完整说明见 docs/31_beacon.md。
+# 一次运行生成和评分。完整说明见 docs/32_browsecomp_plus_vllm.md。
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -12,7 +12,7 @@ cd -- "$PROJECT_ROOT"
 # Linux 环境和已完成 31 的数据版本。多卡可用 0,1,2,3。
 export HF_ENDPOINT=https://huggingface.co
 export HF_HUB_OFFLINE=1
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export SA_BENCHMARK_DIR=artifacts/benchmarks/browsecomp-plus/v2
 
 # 填写本方法的 Qwen3.5-4B 训练实验根目录。
@@ -24,22 +24,24 @@ export SA_OVERLAP=off  # off 保留完整题集；filter 对训练实验排除�
 export SA_OVERLAP_THRESHOLD=0.30
 export SA_RESUME_FROM=''  # 从已完成评测扩展题数时填写旧评测根目录。
 export SA_EVALUATION_DIR=''  # 填已有评测根目录时，仅重新评分。
-export SA_SCORE_AFTER_GENERATION=true  # EVALUATION_DIR 为空时生效。false 仅生成。
+export SA_SCORE_AFTER_GENERATION=false  # EVALUATION_DIR 为空时生效。false 仅生成。
 
-# benchmark 使用统一深度检索提示词；training 使用训练提示词并追加相同的答案格式。
-export SA_GENERATION__PROMPT_PROFILE=benchmark
+# 与 Baseline/Plain 共用原生浏览器协议；本地 Beacon 推理压缩工具正文。
+# benchmark/training 仅供旧实验复现。
+export SA_GENERATION__PROMPT_PROFILE=qwen-native
+export SA_GENERATION__PROMPT_DATE=''  # YYYY-MM-DD；对照实验固定同一天。
 
 # -1 全量；初次运行可改为 5。每个 worker 占用一张可见 GPU 并加载一份模型。
 export SA_GENERATION__LIMIT=-1
 export SA_GENERATION__NUM_WORKERS=1
 # 0 为 No CM；5 保留最近五个成功工具轮次。对照实验使用独立 RUN_NAME。
 export SA_GENERATION__OBSERVATION_WINDOW=0
-export SA_GENERATION__MAX_TURNS=500
+export SA_GENERATION__MAX_TURNS=200
 export SA_GENERATION__MAX_CONTEXT=131072
 export SA_GENERATION__MAX_NEW_TOKENS=8192
-export SA_GENERATION__MAX_TOOL_TOKENS=32768
+export SA_GENERATION__MAX_TOOL_TOKENS=32768  # 仅旧 benchmark/training 协议生效。
 export SA_GENERATION__TOOL_COUNT=4096
-export SA_GENERATION__TOOL_CALL_RETRIES=1
+export SA_GENERATION__TOOL_CALL_RETRIES=1  # 仅旧 benchmark/training 协议生效。
 export SA_GENERATION__DECODING=sample
 export SA_GENERATION__REPETITION_PENALTY=1.0
 export SA_GENERATION__TEMPERATURE=1.0
@@ -54,7 +56,7 @@ export SA_GENERATION__EMBEDDING_DEVICE=cuda:0
 export SA_GENERATION__VERIFY_INDEX=true
 export SA_GENERATION__TITLE_WEIGHT=1.0  # 仅旧版或自定义语料的 SQLite BM25 使用。
 export SA_GENERATION__TOPK=15
-export SA_GENERATION__SNIPPET_TOKENS=512
+export SA_GENERATION__SNIPPET_TOKENS=512  # 以下三项仅旧协议生效；原生协议用 browser 参数。
 export SA_GENERATION__READ_TOKENS=4096
 export SA_GENERATION__ALLOW_VISIT=true
 

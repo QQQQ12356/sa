@@ -128,7 +128,7 @@ def load_official_functions(path, names):
     import ast
     import re
     from typing import Dict, List
-    tree = ast.parse(Path(path).read_text())
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     selected = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:

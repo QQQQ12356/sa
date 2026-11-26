@@ -318,7 +318,7 @@ class ExperimentContracts(unittest.TestCase):
                              [label for label in labels if mode == "any" or label == mode])
 
     def test_every_method_entry_imports_without_running_or_loading_models(self):
-        for method, count in (("plain", 3), ("beacon", 9), ("baseline", 1)):
+        for method, count in (("plain", 4), ("beacon", 10), ("baseline", 2)):
             scripts = list((ROOT / "scripts" / method / "py").glob("*.py"))
             self.assertEqual(len(scripts), count)
             for script in scripts:
@@ -335,14 +335,14 @@ class ExperimentContracts(unittest.TestCase):
         for method, dataset, checkpoint in targets:
             entries = (("browsecomp", "40_test_browsecomp"), ("browsecomp-plus", "42_test_browsecomp_plus"),
                        ("hotpotqa", "44_test_hotpotqa")) if method == "beacon" else (
-                           ("browsecomp-plus", "46_run_browsecomp_plus"),)
+                           ("browsecomp-plus", "46_run_browsecomp_plus"), ("hotpotqa", "47_run_hotpotqa"))
             for benchmark, entry in entries:
                 with self.subTest(method=method, dataset=dataset, benchmark=benchmark, checkpoint=checkpoint):
                     filename = ROOT / "scripts" / method / "py" / f"{entry}.py"
                     settings = parameters(filename)
                     generation = settings["GENERATION"]
                     if method != "beacon":
-                        generation["prompt_profile"] = "qwen-native"
+                        generation["prompt_profile"] = "qwen-native" if benchmark == "browsecomp-plus" else "benchmark"
                     if method != "baseline":
                         self.assertIn(settings["CHECKPOINT"], (None, ""))
                     assets = self.directory / "benchmarks" / benchmark
@@ -388,7 +388,7 @@ class ExperimentContracts(unittest.TestCase):
                     self.assertEqual(observed[0].kind, "beacon" if method == "beacon" else "plain")
                     self.assertEqual(observed[0].model_origin, "base-qwen35" if method == "baseline" else "checkpoint")
                     if method != "beacon":
-                        self.assertEqual(observed[0].prompt_profile, "qwen-native")
+                        self.assertEqual(observed[0].prompt_profile, generation["prompt_profile"])
                         self.assertTrue(observed[0].vllm_urls)
                     if selected:
                         source = json.loads((evaluation / "evaluation.json").read_text(encoding="utf-8"))

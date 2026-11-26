@@ -18,6 +18,6 @@ python -m search_comp.trainer.merge_lora \
   --adapter_path "$TRAINING_RUN/models/model/checkpoint-200"
 ```
 
-Plain 的 46 会从原检查点解析到同级的 `checkpoint-200_merged`。同一次实验的不同权重应使用独立的 `SA_RUN_NAME`。启动 vLLM 后检查 `/v1/models` 的名称与路径，测试完成后检查 `results/manifest.json` 中的 `model` 字段。Beacon 的周期检查点与训练提示词按 [31 Beacon](31_beacon.md) 配置。
+Plain 的 46 会从原检查点解析到同级的 `checkpoint-200_merged`。同一次实验的不同权重应使用独立的 `SA_RUN_NAME`。启动 vLLM 后检查 `/v1/models` 的名称与路径，测试完成后检查 `results/manifest.json` 中的 `model` 字段。Beacon 的周期检查点与提示词选择按 [31 Beacon](31_beacon.md) 配置。
 
-已有结果在 Baseline/Plain 的 46 或 Beacon 的对应评分入口填入 `SA_EVALUATION_DIR`。读取 `results/predictions.jsonl` 核对题目、轨迹和答案。使用 `scripts/tools/sh/81_prediction_report.sh` 可将轨迹和匹配的评分记录渲染为同一份 HTML 报告。
+已有结果在同方法、同题集的入口填入 `SA_EVALUATION_DIR`。三种方法均用各自的 46 评 BrowseComp-Plus，用 47 评 HotpotQA。旧 Beacon 独立评分入口保留用于兼容旧实验。读取 `results/predictions.jsonl` 核对题目、轨迹和答案。使用 `scripts/tools/sh/81_prediction_report.sh` 可将轨迹和匹配的评分记录渲染为同一份 HTML 报告。

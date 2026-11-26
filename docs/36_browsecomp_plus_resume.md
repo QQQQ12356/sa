@@ -6,10 +6,10 @@
 |---|---|---|
 | BrowseComp | Beacon 的 `40_test_browsecomp.sh` | 同方法的 `41_score_browsecomp.sh` |
 | BrowseComp-Plus | Baseline/Plain 的 46，Beacon 的 42 或 46 | 同方法的 46，Beacon 也可用 43 |
-| HotpotQA | Beacon 的 `44_test_hotpotqa.sh` | 同方法的 `45_score_hotpotqa.sh` |
+| HotpotQA | 三种方法的 [47 统一入口](37_hotpotqa_vllm.md)，旧 Beacon 可用 44 | 三种方法用 47，旧 Beacon 可用 45 |
 | 训练数据或同来源保留划分 | `scripts/tools/sh/84_test_training_data.sh`，支持 train、validation、test | 生成后自动汇总合并结果的 EM/F1 |
 
-续测使用原方法和入口。Baseline/Plain 使用 [46 vLLM](32_browsecomp_plus_vllm.md)，Beacon 使用原生入口。
+续测使用原方法、题集和入口。Baseline/Plain 的 BrowseComp-Plus 使用 [46 vLLM](32_browsecomp_plus_vllm.md)。
 
 BrowseComp-Plus 在生成期间中断时，可用 [85 恢复评分](#85-从中断的-browsecomp-plus-测试恢复评分) 汇总已写入的预测并计算临时指标。
 

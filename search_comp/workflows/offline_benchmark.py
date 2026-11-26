@@ -1,4 +1,4 @@
-"""Prepare, index, run and score fixed-corpus benchmarks with no network during evaluation."""
+"""Prepare, retrieve, generate and score reproducible fixed-corpus benchmarks."""
 from __future__ import annotations
 
 import argparse
@@ -124,6 +124,17 @@ def open_documents(stack, root, metadata, *, threaded):
     return stack.enter_context(LocalIndex(root / "index.sqlite", threaded=threaded))
 
 
+
+def open_retrieval(stack, args, documents, metadata):
+    """Use the same ranker selection for local models and vLLM clients."""
+    if getattr(args, "retriever", "bm25") == DENSE_BACKEND:
+        return DenseIndex(documents, args.vector_index_dir, args.embedding_model_path,
+                          args.embedding_device, metadata["vector_index"])
+    if isinstance(metadata.get("ranking"), dict):
+        return stack.enter_context(closing(LuceneIndex(documents, args.root / BCP_LUCENE_DIR)))
+    return documents
+
+
 def agent_prompt(args):
     from search_comp.data.agent_prompt import build_system_prompt, resolve_system_prompt
 
@@ -134,7 +145,11 @@ def agent_prompt(args):
         return native_prompt(args.prompt_date), "browsecomp-plus/qwen-native-v1"
     if args.benchmark == "browsecomp-plus" and profile != "legacy":
         return system_prompt(profile, args.prompt_data, args.run_dir, args.allow_visit)
-    original_system, source = resolve_system_prompt(getattr(args, "prompt_data", None), args.run_dir)
+    if args.benchmark == "hotpotqa" and profile == "benchmark":
+        original_system, _ = resolve_system_prompt()
+        source = "hotpotqa/benchmark-v1"
+    else:
+        original_system, source = resolve_system_prompt(getattr(args, "prompt_data", None), args.run_dir)
     instruction = HOTPOT_INSTRUCTION if args.benchmark == "hotpotqa" else BCP_INSTRUCTION
     return build_system_prompt(system=original_system, local=True, allow_visit=args.allow_visit,
                                answer_instruction=instruction), source
@@ -177,12 +192,7 @@ def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
     start = time.monotonic()
     with ExitStack() as stack:
         index = open_documents(stack, args.root, index_metadata, threaded=native)
-        retrieval = index
-        if getattr(args, "retriever", "bm25") == DENSE_BACKEND:
-            retrieval = DenseIndex(index, args.vector_index_dir, args.embedding_model_path,
-                                   args.embedding_device, index_metadata["vector_index"])
-        elif isinstance(index_metadata.get("ranking"), dict):
-            retrieval = stack.enter_context(closing(LuceneIndex(index, args.root / BCP_LUCENE_DIR)))
+        retrieval = open_retrieval(stack, args, index, index_metadata)
         target = stack.enter_context((output / "predictions.jsonl").open("x", encoding="utf-8"))
         if native:
             tools = stack.enter_context(closing(NativeBrowser(retrieval, index, highlight, args.topk, args.tool_count)))
@@ -238,13 +248,14 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
     import httpx
     from transformers import AutoTokenizer
 
-    from search_comp.evaluation.qwen_native_browser import run_agent
-    from search_comp.evaluation.tool_agent import decoding_options
+    from search_comp.evaluation.qwen_native_browser import run_agent as run_native_agent
+    from search_comp.evaluation.tool_agent import decoding_options, run_agent
     from search_comp.evaluation.vllm_client import VllmClient, endpoint_urls
     from search_comp.experiments.vllm_serve import serving_model
     from search_comp.offline.native_browser import NativeBrowser, load_highlighter
 
     urls = endpoint_urls(args.vllm_urls)
+    native = args.benchmark == "browsecomp-plus"
     options = decoding_options(args)
     model = serving_model(args.run_dir, args.model, args.kind, args.model_origin)
     system, prompt_source = prompt or agent_prompt(args)
@@ -257,37 +268,45 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
     with ExitStack() as stack:
         limits = httpx.Limits(max_connections=width, max_keepalive_connections=width)
         http = stack.enter_context(httpx.Client(timeout=args.vllm_timeout, trust_env=False, limits=limits))
-        clients = [VllmClient(http, url, model, args.model_origin, options, args.max_context) for url in urls]
+        protocol = "qwen-native" if native else "openseeker"
+        clients = [VllmClient(http, url, model, args.model_origin, options, args.max_context,
+                              tool_protocol=protocol) for url in urls]
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
-        documents = open_documents(stack, args.root, metadata, threaded=True)
-        highlight = load_highlighter(args.root)
-        if args.retriever == DENSE_BACKEND:
-            retrieval = DenseIndex(documents, args.vector_index_dir, args.embedding_model_path,
-                                   args.embedding_device, metadata["vector_index"])
-        elif isinstance(metadata.get("ranking"), dict):
-            retrieval = stack.enter_context(closing(LuceneIndex(documents, args.root / BCP_LUCENE_DIR)))
-        else:
-            retrieval = documents
+        if native:
+            documents = open_documents(stack, args.root, metadata, threaded=True)
+            highlight = load_highlighter(args.root)
+            retrieval = open_retrieval(stack, args, documents, metadata)
 
         def predict(position, row):
             tick = time.monotonic()
             generate = clients[(position + getattr(args, "question_offset", 0)) % len(clients)]
             messages = [dict(role="system", content=system), dict(role="user", content=row["query"])]
-            with closing(NativeBrowser(retrieval, documents, highlight, args.topk, args.tool_count,
-                                       search_lock=search_lock)) as browser:
-                result = run_agent(messages, tokenizer, generate, browser, max_turns=args.max_turns,
-                                   max_context=args.max_context, max_new_tokens=args.max_new_tokens,
-                                   observation_window=args.observation_window)
-                final_response = result["prediction"]
+            if native:
+                with closing(NativeBrowser(retrieval, documents, highlight, args.topk, args.tool_count,
+                                           search_lock=search_lock)) as tools:
+                    result = run_native_agent(messages, tokenizer, generate, tools, max_turns=args.max_turns,
+                                              max_context=args.max_context, max_new_tokens=args.max_new_tokens,
+                                              observation_window=args.observation_window)
+            else:
+                # Each question owns its tools and read-only connection.
+                with LocalIndex(args.root / "index.sqlite") as index:
+                    tools = LocalTools(index, tokenizer, args.topk, args.snippet_tokens, args.read_tokens,
+                                       args.allow_visit, args.tool_count)
+                    result = run_agent(messages, tokenizer, generate, tools, args.max_turns, args.max_context,
+                                       args.max_new_tokens, args.max_tool_tokens,
+                                       max_call_retries=args.tool_call_retries, record_turn_stats=True)
+            final_response = result["prediction"]
+            if native:
                 exact = extract_exact_answer(final_response)
-                result.update(id=row["id"], sample_index=position, prompt_source=prompt_source,
-                              query=row["query"], answer=row["answer"], final_response=final_response,
-                              prediction=exact, exact_answer=exact, seconds=time.monotonic() - tick,
-                              retrieved_docids=sorted(browser.retrieved), visited_docids=sorted(browser.visited),
-                              retrieval_trace=browser.trace, tool_call_counts=dict(browser.counts))
+                result.update(prediction=exact, exact_answer=exact)
                 if result["status"] == "completed" and not exact:
                     result["status"] = "empty_answer"
-                return result
+            result.update(id=row["id"], sample_index=position, prompt_source=prompt_source,
+                          query=row["query"], answer=row["answer"], final_response=final_response,
+                          seconds=time.monotonic() - tick, retrieved_docids=sorted(tools.retrieved),
+                          visited_docids=sorted(tools.visited), retrieval_trace=tools.trace,
+                          tool_call_counts=dict(tools.counts))
+            return result
 
         pools = [stack.enter_context(ThreadPoolExecutor(max_workers=args.vllm_concurrency)) for _ in urls]
         target = stack.enter_context((output / "predictions.jsonl").open("x", encoding="utf-8"))
@@ -670,16 +689,22 @@ def run(args):
             endpoint_urls(vllm_urls)
         except ValueError as error:
             parser.error(str(error))
-        if (args.action != "run" or profile != "qwen-native" or args.kind != "plain"
+        vllm_profiles = {"browsecomp-plus": "qwen-native", "hotpotqa": "benchmark"}
+        if (args.action != "run" or profile != vllm_profiles.get(args.benchmark) or args.kind != "plain"
                 or args.num_workers != 1 or args.shard_count != 1):
-            parser.error("vLLM requires a baseline/plain qwen-native run with num-workers=1")
+            parser.error("vLLM requires a baseline/plain run with the corresponding benchmark prompt and num-workers=1")
         if (args.vllm_concurrency < 1 or not math.isfinite(args.vllm_timeout) or args.vllm_timeout <= 0):
             parser.error("vLLM concurrency and timeout must be positive")
-    if profile not in {"legacy", "benchmark", "training", "qwen-native"} or (profile != "legacy" and args.benchmark != "browsecomp-plus"):
-        parser.error("structured prompt profiles are supported for BrowseComp-Plus only")
+    profiles = {"browsecomp-plus": {"legacy", "benchmark", "training", "qwen-native"},
+                "hotpotqa": {"legacy", "benchmark"}}
+    if profile not in profiles.get(args.benchmark, {"legacy"}):
+        parser.error("prompt profile is unsupported for this benchmark")
+    if args.benchmark == "hotpotqa" and profile == "benchmark" and args.prompt_data:
+        parser.error("HotpotQA benchmark prompt does not accept a prompt override")
     if profile == "qwen-native":
-        if (getattr(args, "model_origin", None) != "base-qwen35" and not vllm_urls) or args.prompt_data:
-            parser.error("qwen-native requires baseline or a plain vLLM checkpoint and no prompt override")
+        if (getattr(args, "model_origin", None) != "base-qwen35"
+                and not vllm_urls and args.kind != "beacon") or args.prompt_data:
+            parser.error("qwen-native requires baseline, a plain vLLM checkpoint or local Beacon and no prompt override")
         prompt_date = getattr(args, "prompt_date", None)
         resume = getattr(args, "resume_from", None)
         if not prompt_date and resume:

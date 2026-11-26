@@ -6,7 +6,7 @@
 
 ## 1. 准备题目、语料和文档库
 
-在已激活的 Linux 评测环境中安装检索依赖。官方 BM25 排序和 Baseline/Plain 原生浏览器的摘要高亮均需要 Java 21，确保 `java -version` 显示 21 且 `JAVA_HOME` 指向同一安装。
+在已激活的 Linux 评测环境中安装检索依赖。官方 BM25 排序和 三种方法原生浏览器的摘要高亮均需要 Java 21，确保 `java -version` 显示 21 且 `JAVA_HOME` 指向同一安装。
 
 ```bash
 python -m pip install -r requirements.browsecomp-plus.txt
@@ -77,7 +77,7 @@ export SA_GENERATION__EMBEDDING_DEVICE=cuda:0
 | `SA_GENERATION__VERIFY_INDEX` | `true` | 校验所用语料、索引文件的 SHA256。关闭时仍核对来源和文件清单。 |
 | `SA_GENERATION__TITLE_WEIGHT` | `1.0` | 用于旧版或自定义语料的 SQLite FTS5 排序。 |
 | `SA_GENERATION__TOPK` | `15`（46）；`5`（42） | 每条查询取回的不同文档数。 |
-| `SA_GENERATION__SNIPPET_TOKENS` / `SA_GENERATION__READ_TOKENS` | `512` / `4096` | 分别控制每篇搜索摘录和 visit 正文的 token 预算。 |
+| `SA_GENERATION__SNIPPET_TOKENS` / `SA_GENERATION__READ_TOKENS` | `512` / `4096` | 仅 HotpotQA/旧 Beacon 协议控制每篇摘录和 visit 的 token 预算；推荐原生 BCP 由 browser 参数控制。 |
 
 首次以 `SA_GENERATION__LIMIT=5` 跑小样本，检查 `results/manifest.json` 的 `index.retriever`、`index.ranking` 和向量模式下的 `index.vector_index`。官方向量直读模式的 `index.version` 为 `parquet-corpus-v1`。每个评测进程都加载一份 CPU FAISS 索引，全量向量约 1.53 GiB，直读还会将语料载入内存。
 
