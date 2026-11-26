@@ -33,10 +33,12 @@ def mix_datasets(*, openseeker_prepared, research_prepared, profile, tokenizer,
         raise ValueError("父版本目录必须互不相同")
     parts = ratio.split(":")
     if len(parts) != len(parents) or any(not part.isascii() or not part.isdecimal() for part in parts):
-        raise ValueError(f"RATIO 须为 {len(parents)} 个以冒号分隔的正整数")
+        raise ValueError(f"RATIO 须为 {len(parents)} 个以冒号分隔的非负整数")
     weights = tuple(map(int, parts))
-    if min(weights) < 1 or max_length < 1:
-        raise ValueError("RATIO 两项和 MAX_LENGTH 必须为正数")
+    if not any(weights):
+        raise ValueError("RATIO 至少有一项大于 0")
+    if max_length < 1:
+        raise ValueError("MAX_LENGTH 必须为正数")
     divisor = gcd(*weights)
     weights = tuple(weight // divisor for weight in weights)
     output = ROOT / "artifacts/datasets/mixed/prepared" / slug(profile)
@@ -83,7 +85,8 @@ def mix_datasets(*, openseeker_prepared, research_prepared, profile, tokenizer,
 
         train = rows["train"]
         available = {name: len(pool) for name, pool in train.items()}
-        batches = min(available[name] // weight for name, weight in zip(parents, weights))
+        # Zero weights disable training samples only; held-out questions still reserve their split.
+        batches = min(available[name] // weight for name, weight in zip(parents, weights) if weight)
         if not batches:
             raise ValueError(f"可用训练样本不足以满足比例 {ratio}: {available}")
         rng = random.Random(seed)

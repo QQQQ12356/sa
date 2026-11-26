@@ -21,7 +21,8 @@ export SA_PROFILE=qwen35_L16384_mix_1to1_s42
 export SA_TOKENIZER=/models/Qwen3.5-4B
 # 完整轨迹 token 上限。超长整条排除。训练 max_length 至少取此值。
 export SA_MAX_LENGTH=16384
-# 比例依次对应已填写的 OpenSeeker、Research、BrowseComp SFT，跳过空项。例如两来源 1:1，三来源 2:1:1。
+# 训练样本数比例，依次对应已填写的 OpenSeeker、Research、BrowseComp SFT，跳过空目录。
+# 允许 0，但至少一项大于 0。例如 1:0 或 2:0:1；零比例来源仍保留验证/测试及同题隔离。
 export SA_RATIO=1:1
 # 控制无放回抽样与训练集输出顺序。
 export SA_SEED=42

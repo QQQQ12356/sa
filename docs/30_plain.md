@@ -14,7 +14,8 @@
 |---|---|---|
 | OpenSeeker | `scripts/plain/sh/10_train_openseeker.sh` | `artifacts/datasets/openseeker/prepared/<PROFILE>` |
 | Research | `scripts/plain/sh/11_train_research.sh` | `artifacts/datasets/research/prepared/<PROFILE>` |
-| BrowseComp SFT | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=browsecomp-sft` | `artifacts/datasets/browsecomp-sft/prepared/<PROFILE>` |
+| [BrowseComp SFT](21_browsecomp_sft.md) | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=browsecomp-sft` | `artifacts/datasets/browsecomp-sft/prepared/<PROFILE>` |
+| [混合数据](20_data.md#5-可选混合-openseeker-与-research) | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=mixed` | `artifacts/datasets/mixed/prepared/<PROFILE>` |
 
 在选定文件中修改：
 

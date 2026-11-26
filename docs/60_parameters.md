@@ -26,7 +26,7 @@ benchmark 评分后的 Excel 导出使用 `scripts/tools/sh/82_benchmark_excel.s
 | HF_HOME / TORCH_HOME / XDG_CACHE_HOME | 共享层默认缓存到 artifacts/cache；服务器已设置时保留。 |
 | RUN_NAME | 一次实验/测试/评分的语义标签；1–96 字符，仅英文字母、数字、下划线、连字符。 |
 | DATASET_DIR | 训练使用的 prepared 数据版本。 |
-| DATASET_NAME | 两个 Research 训练入口均可选 research 或 mixed，须与 DATASET_DIR 的清单来源一致。 |
+| DATASET_NAME | Plain/Beacon 的 Research 训练入口均可选 research、browsecomp-sft 或 mixed，须与 DATASET_DIR 的清单来源一致。 |
 | MODEL_PATH | 训练基座或 baseline 本地权重；与 tokenizer 计长身份一致。 |
 | MODEL_FAMILY | 训练适配族 qwen3/qwen35；baseline 固定原始 Qwen3.5。 |
 | PLAN_ONLY | True 只校验/归档，不加载模型；False 正式训练且创建新记录。 |
@@ -39,7 +39,7 @@ benchmark 评分后的 Excel 导出使用 `scripts/tools/sh/82_benchmark_excel.s
 | SCORE_AFTER_GENERATION | 46/47 默认 false，仅生成；true 在生成完成后评分。EVALUATION_DIR 非空时总是只评分。 |
 | OVERLAP / OVERLAP_THRESHOLD | 46 的训练重合筛选 off/filter 及匹配阈值（默认 0.30）；推荐 off 保留共同题集。HotpotQA 47 不使用。 |
 
-混合数据脚本 `24_mix_datasets.sh` 的父目录、比例、seed 和长度参数见 [混合 OpenSeeker 与 Research](20_data.md#5-可选混合-openseeker-与-research)。
+混合数据脚本 `24_mix_datasets.sh` 的父目录、比例、seed 和长度参数见 [混合数据](20_data.md#5-可选混合-openseeker-与-research)。训练比例允许 0，但不能全部为 0；零比例来源仍保留验证/测试隔离。
 
 BrowseComp SFT 的下载、预处理变量及测试前的 `SA_OVERLAP`、`SA_OVERLAP_THRESHOLD` 见 [BrowseComp SFT 数据接入](21_browsecomp_sft.md)。
 

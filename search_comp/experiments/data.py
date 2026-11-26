@@ -39,6 +39,8 @@ def prepare_dataset(*, dataset_name, source, snapshot_dir, inputs, profile, mode
             if snapshot["repo"] != REPO or not shards or not set(shards) <= set(SHARDS):
                 raise ValueError("请选择正确的 BrowseComp SFT 快照和 SA_SHARDS")
             inputs = [p for p in snapshot["parquet_inputs"] if path(p).name in shards]
+            if {path(p).name for p in inputs} != set(shards):
+                raise ValueError("BrowseComp SFT 快照清单缺少所选 SA_SHARDS，请重新下载")
         else:
             inputs = snapshot["jsonl_inputs"]
     inputs = [path(p) for p in inputs]

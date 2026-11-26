@@ -23,7 +23,7 @@ export CUDA_VISIBLE_DEVICES=0
 # SOURCE：固定 browsecomp-sft，输出到 artifacts/datasets/browsecomp-sft/prepared/<PROFILE>/。
 export SA_SOURCE=browsecomp-sft
 
-# SNAPSHOT_DIR：必改：下载输出的 commit 目录；自动读取清单内全部 shard；与 INPUTS 互斥
+# SNAPSHOT_DIR：下载输出的 commit 目录；按 SHARDS 选择分片；与 INPUTS 互斥
 export SA_SNAPSHOT_DIR=''
 
 # INPUTS：本地 JSONL/Parquet 路径列表；使用它时将 SNAPSHOT_DIR 留空
