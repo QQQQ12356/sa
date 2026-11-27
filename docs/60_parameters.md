@@ -41,7 +41,9 @@ benchmark 评分后的 Excel 导出使用 `scripts/tools/sh/82_benchmark_excel.s
 
 混合数据脚本 `24_mix_datasets.sh` 的父目录、比例、seed 和长度参数见 [混合数据](20_data.md#5-可选混合-openseeker-与-research)。训练比例允许 0，但不能全部为 0；零比例来源仍保留验证/测试隔离。
 
-BrowseComp SFT 的下载、预处理变量及测试前的 `SA_OVERLAP`、`SA_OVERLAP_THRESHOLD` 见 [BrowseComp SFT 数据接入](21_browsecomp_sft.md)。
+BrowseComp-Plus SFT 的下载、预处理变量及测试前的 `SA_OVERLAP`、`SA_OVERLAP_THRESHOLD` 见 [BrowseComp-Plus SFT 数据接入](21_browsecomp_sft.md)。
+
+BrowseComp-Plus SFT 默认 `SA_SYSTEM_PROMPT_MODE=by-shard`，`SA_MAIN_PROMPT_MODE=official`、`SA_PLANNER_PROMPT_MODE=normalized` 分别处理主/辅助分片。normalized/original 继续保留；主分片还可选 official-read。Plain/Beacon 的 46/48/49 分别固定为浏览器/官方任务/原始协议，不能在入口间切换 profile。48 要求 TOPK=5、SNIPPET_TOKENS=512、OBSERVATION_WINDOW=0，并填写本地 Qwen3-0.6B 的 `SA_GENERATION__SNIPPET_TOKENIZER_PATH`；其 ALLOW_VISIT 控制是否开放 get_document。49 的 PROMPT_DATA 可指定单一原始 system。切换预处理模式须新建数据版本并重新计长，完整说明见 [21](21_browsecomp_sft.md#主分片的官方任务对齐)。
 
 在线页面读取与总结的 ENVIRONMENT 字段：`SUMMARY_ATTEMPTS` 为有限重试次数（1–10，默认 3）；`SUMMARY_MAX_INPUT_CHARS` 为总结输入字符上限（40000）；`SUMMARY_MAX_TOKENS` 为总结输出 token 上限（2048）；`SUMMARY_TIMEOUT` 为总结超时秒数（120）；`JINA_TIMEOUT` 为页面读取超时秒数（50）。`SUMMARY_API_URL` 和 `SCORER_URLS` 填基础地址如 `http://host:8000/v1`，客户端追加 `/chat/completions`。
 

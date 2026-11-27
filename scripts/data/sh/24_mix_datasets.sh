@@ -13,7 +13,7 @@ cd -- "$PROJECT_ROOT"
 # 父版本目录。填写任意两个或三个来源的预处理或二次筛选目录，其余留空。
 export SA_OPENSEEKER_PREPARED=artifacts/datasets/openseeker/prepared/qwen35_L16384_s42
 export SA_RESEARCH_PREPARED=artifacts/datasets/research/prepared/qwen35_L16384_s42
-# BrowseComp SFT 父版本目录。填入 25 或 26 脚本输出的目录。
+# BrowseComp-Plus SFT 父版本目录。填入 25 或 26 脚本输出的目录。
 export SA_BROWSECOMP_SFT_PREPARED=''
 # 输出版本名。已有同名版本时请改名。
 export SA_PROFILE=qwen35_L16384_mix_1to1_s42
@@ -21,7 +21,7 @@ export SA_PROFILE=qwen35_L16384_mix_1to1_s42
 export SA_TOKENIZER=/models/Qwen3.5-4B
 # 完整轨迹 token 上限。超长整条排除。训练 max_length 至少取此值。
 export SA_MAX_LENGTH=16384
-# 训练样本数比例，依次对应已填写的 OpenSeeker、Research、BrowseComp SFT，跳过空目录。
+# 训练样本数比例，依次对应已填写的 OpenSeeker、Research、BrowseComp-Plus SFT，跳过空目录。
 # 允许 0，但至少一项大于 0。例如 1:0 或 2:0:1；零比例来源仍保留验证/测试及同题隔离。
 export SA_RATIO=1:1
 # 控制无放回抽样与训练集输出顺序。

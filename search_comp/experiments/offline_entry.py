@@ -36,9 +36,10 @@ def launcher_schema(method, benchmark="browsecomp-plus"):
     if method in {"baseline", "plain"}:
         method_fields.update(GENERATION__VLLM_URLS="str",
                              GENERATION__VLLM_CONCURRENCY="int", GENERATION__VLLM_TIMEOUT="float")
-        for name in ("PROMPT_DATA", "GENERATION__PROMPT_PROFILE", "GENERATION__NUM_WORKERS"):
-            del schema[name]
-        if benchmark == "browsecomp-plus":
+        if not (method == 'plain' and benchmark == 'browsecomp-plus'):
+            for name in ("PROMPT_DATA", "GENERATION__PROMPT_PROFILE", "GENERATION__NUM_WORKERS"):
+                del schema[name]
+        if benchmark == "browsecomp-plus" and method != 'plain':
             for name in ("MAX_TOOL_TOKENS", "TOOL_CALL_RETRIES", "SNIPPET_TOKENS", "READ_TOKENS", "ALLOW_VISIT"):
                 del schema[f"GENERATION__{name}"]
     if benchmark == "hotpotqa":
@@ -53,6 +54,8 @@ def launcher_schema(method, benchmark="browsecomp-plus"):
                              JUDGE__JUDGE_ENABLE_THINKING="bool", JUDGE__JUDGE_TEMPERATURE="float",
                              JUDGE__JUDGE_TOP_P="float", JUDGE__JUDGE_TOP_K="int", JUDGE__SEED="int")
     schema.update({name: {"env": f"SA_{name}", "type": kind} for name, kind in method_fields.items()})
+    if method in {'plain', 'beacon'} and benchmark == 'browsecomp-plus':
+        schema['GENERATION__SNIPPET_TOKENIZER_PATH'] = {'env': 'SA_GENERATION__SNIPPET_TOKENIZER_PATH', 'type': 'optional'}
     return schema
 
 
@@ -60,9 +63,24 @@ def launch(method, filename, schema, *, benchmark="browsecomp-plus"):
     from .benchmarks import run_offline_benchmark
 
     settings = load_settings(filename, schema)
+    if method in {'plain', 'beacon'} and benchmark == 'browsecomp-plus':
+        from pathlib import Path
+        number = Path(filename).stem.split('_', 1)[0]
+        expected = {'46': 'qwen-native', '48': 'official', '49': 'original'}.get(number)
+        if expected and settings['GENERATION']['prompt_profile'] != expected:
+            raise ValueError(f'{number} 入口固定使用 {expected}；浏览器/官方/原始实验须使用各自入口')
+        if expected and settings.get('EVALUATION_DIR'):
+            from .runtime import path, read_json
+            record = path(settings['EVALUATION_DIR']) / 'evaluation.json'
+            if record.is_file() and read_json(record).get('generation', {}).get('prompt_profile') != expected:
+                raise ValueError('已有评测的提示词协议与当前入口不同，请使用原实验入口评分')
     if method in {"baseline", "plain"}:
-        settings["PROMPT_DATA"] = None
-        settings["GENERATION"]["prompt_profile"] = "qwen-native" if benchmark == "browsecomp-plus" else "benchmark"
+        if method == 'plain' and benchmark == 'browsecomp-plus':
+            if settings['GENERATION']['prompt_profile'] not in {'qwen-native', 'original', 'official'}:
+                raise ValueError('invalid Plain BrowseComp-Plus prompt profile')
+        else:
+            settings["PROMPT_DATA"] = None
+            settings["GENERATION"]["prompt_profile"] = "qwen-native" if benchmark == "browsecomp-plus" else "benchmark"
         if "SA_SERVE_PORT" in os.environ:
             from .vllm_serve import serve
 

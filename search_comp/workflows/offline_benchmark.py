@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
+from functools import lru_cache
 from contextlib import ExitStack, closing
 from datetime import date, datetime, timezone
 import gc
@@ -28,7 +29,7 @@ from search_comp.offline.index import (
 )
 from search_comp.offline.qwen_embedding import BACKEND as DENSE_BACKEND, DenseIndex, read_vector_manifest
 from search_comp.offline.scoring import LocalJudge, load_predictions, score_browsecomp, score_hotpot
-from search_comp.offline.tools import BCP_INSTRUCTION, HOTPOT_INSTRUCTION, LocalTools
+from search_comp.offline.tools import BCP_INSTRUCTION, HOTPOT_INSTRUCTION, LocalTools, OriginalLocalTools, OfficialLocalTools
 from search_comp.utils.devices import worker_devices
 from search_comp.utils.progress import CompletionProgress, generation_label
 
@@ -88,6 +89,8 @@ def verify_sqlite(args, manifest):
 
 def verify_index(args, manifest):
     print(f"[offline {args.benchmark}] checking local index; verify_checksum={args.verify_index}", flush=True)
+    if getattr(args, 'prompt_profile', None) == 'official' and not manifest.get('canonical_corpus'):
+        raise ValueError('official task profile requires the complete official corpus')
     if getattr(args, "retriever", "bm25") == DENSE_BACKEND:
         dense = read_vector_manifest(args.vector_index_dir, manifest, args.embedding_model_path, args.verify_index)
         if dense.get("storage") == "parquet-and-pickle":
@@ -105,6 +108,20 @@ def verify_index(args, manifest):
             raise ValueError("missing official Lucene BM25 provenance; restore the downloaded snapshot")
         elif metadata["title_weight"] != args.title_weight:
             raise ValueError("TITLE_WEIGHT differs from the built index; rebuild in a new ROOT")
+    if getattr(args, 'prompt_profile', None) == 'official':
+        from search_comp.data.browsecomp_plus_official import VERSION, SOURCE_URL, task_prompt
+        import hashlib
+
+        corpus = parquet_corpus_metadata(args.root, manifest, args.verify_index)
+        directory = args.snippet_tokenizer_path
+        identity = directory / 'download_manifest.json'
+        if identity.is_file() and json.loads(identity.read_text(encoding='utf-8')).get('repo_id') != 'Qwen/Qwen3-0.6B':
+            raise ValueError('official snippets require the Qwen/Qwen3-0.6B tokenizer')
+        metadata = dict(metadata, **corpus, official_task=dict(version=VERSION, source=SOURCE_URL,
+            task_sha256=hashlib.sha256(task_prompt('{question}', args.allow_visit).encode()).hexdigest(),
+            snippet_tokenizer={name: digest(directory / name) for name in (
+                'tokenizer.json', 'tokenizer_config.json', 'vocab.json', 'merges.txt', 'special_tokens_map.json')
+                if (directory / name).is_file()}))
     if getattr(args, "prompt_profile", "legacy") == "qwen-native":
         assets = json.loads((args.root / "assets.json").read_text(encoding="utf-8"))
         expected = assets.get("lucene_highlighter_sha256", {})
@@ -120,7 +137,7 @@ def verify_index(args, manifest):
 
 def open_documents(stack, root, metadata, *, threaded):
     if metadata.get("version") == "parquet-corpus-v1":
-        return ParquetCorpus(root, metadata)
+        return ParquetCorpus(root, metadata, preserve_raw=bool(metadata.get('official_task')))
     return stack.enter_context(LocalIndex(root / "index.sqlite", threaded=threaded))
 
 
@@ -139,6 +156,13 @@ def agent_prompt(args):
     from search_comp.data.agent_prompt import build_system_prompt, resolve_system_prompt
 
     profile = getattr(args, "prompt_profile", "legacy")
+    if profile == 'official':
+        from search_comp.data.browsecomp_plus_official import VERSION, system_prompt as official_system
+        return official_system(args.allow_visit), VERSION
+    if profile == 'original':
+        from search_comp.data.agent_prompt import resolve_original_system_prompt
+
+        return resolve_original_system_prompt(args.prompt_data, args.run_dir)
     if profile == "qwen-native":
         from search_comp.evaluation.qwen_native_browser import system_prompt as native_prompt
 
@@ -153,6 +177,29 @@ def agent_prompt(args):
     instruction = HOTPOT_INSTRUCTION if args.benchmark == "hotpotqa" else BCP_INSTRUCTION
     return build_system_prompt(system=original_system, local=True, allow_visit=args.allow_visit,
                                answer_instruction=instruction), source
+
+
+def evaluation_messages(args, system, question):
+    if getattr(args, 'prompt_profile', None) == 'official':
+        from search_comp.data.browsecomp_plus_official import task_prompt
+        question = task_prompt(question, args.allow_visit)
+    return [dict(role='system', content=system), dict(role='user', content=question)]
+
+
+@lru_cache(maxsize=4)
+def load_snippet_tokenizer(directory):
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(directory, local_files_only=True)
+
+
+def make_local_tools(args, retrieval, tokenizer, *, search_lock=None):
+    options = (retrieval, tokenizer, args.topk, args.snippet_tokens, args.read_tokens, args.allow_visit, args.tool_count)
+    if args.prompt_profile == 'official':
+        snippet_tokenizer = load_snippet_tokenizer(args.snippet_tokenizer_path)
+        return OfficialLocalTools(*options, snippet_tokenizer=snippet_tokenizer, search_lock=search_lock)
+    if args.prompt_profile == 'original':
+        return OriginalLocalTools(*options, search_lock=search_lock)
+    return LocalTools(*options)
 
 
 def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
@@ -188,6 +235,8 @@ def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
         generate.metadata['base_model_path'] = model_path
     if native:
         generate.metadata['tool_protocol'] = "qwen-native"
+    elif args.prompt_profile in {'original', 'official'}:
+        generate.metadata['tool_protocol'] = 'official-task' if args.prompt_profile == 'official' else 'research-original'
     statuses = Counter()
     start = time.monotonic()
     with ExitStack() as stack:
@@ -197,13 +246,12 @@ def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
         if native:
             tools = stack.enter_context(closing(NativeBrowser(retrieval, index, highlight, args.topk, args.tool_count)))
         else:
-            tools = LocalTools(retrieval, tokenizer, args.topk, args.snippet_tokens, args.read_tokens,
-                               args.allow_visit, args.tool_count)
+            tools = make_local_tools(args, retrieval, tokenizer)
         for position, row in enumerate(rows):
             tools.reset()
             tick = time.monotonic()
             # Only question text, no reference, qrels, supporting facts or source context.
-            messages = [dict(role="system", content=system), dict(role="user", content=row["query"])]
+            messages = evaluation_messages(args, system, row['query'])
             if native:
                 result = run_native_agent(messages, tokenizer, generate, tools, max_turns=args.max_turns,
                                           max_context=args.max_context, max_new_tokens=args.max_new_tokens,
@@ -213,7 +261,8 @@ def run_phase(args, output, rows, manifest, index_metadata=None, prompt=None):
                                    args.max_context, args.max_new_tokens, args.max_tool_tokens,
                                    max_call_retries=args.tool_call_retries,
                                    observation_window=getattr(args, "observation_window", 0),
-                                   record_turn_stats=args.benchmark == "browsecomp-plus")
+                                   record_turn_stats=args.benchmark == "browsecomp-plus",
+                                   call_protocol='research-original' if args.prompt_profile in {'original', 'official'} else 'openseeker')
             final_response = result["prediction"]
             if structured_answer:
                 exact_answer = extract_exact_answer(final_response)
@@ -255,7 +304,8 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
     from search_comp.offline.native_browser import NativeBrowser, load_highlighter
 
     urls = endpoint_urls(args.vllm_urls)
-    native = args.benchmark == "browsecomp-plus"
+    native = args.benchmark == "browsecomp-plus" and args.prompt_profile == 'qwen-native'
+    original = args.prompt_profile in {'original', 'official'}
     options = decoding_options(args)
     model = serving_model(args.run_dir, args.model, args.kind, args.model_origin)
     system, prompt_source = prompt or agent_prompt(args)
@@ -268,25 +318,33 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
     with ExitStack() as stack:
         limits = httpx.Limits(max_connections=width, max_keepalive_connections=width)
         http = stack.enter_context(httpx.Client(timeout=args.vllm_timeout, trust_env=False, limits=limits))
-        protocol = "qwen-native" if native else "openseeker"
+        protocol = ('qwen-native' if native else 'official-task' if args.prompt_profile == 'official'
+                    else 'research-original' if original else 'openseeker')
         clients = [VllmClient(http, url, model, args.model_origin, options, args.max_context,
                               tool_protocol=protocol) for url in urls]
         tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
-        if native:
+        if native or original:
             documents = open_documents(stack, args.root, metadata, threaded=True)
-            highlight = load_highlighter(args.root)
             retrieval = open_retrieval(stack, args, documents, metadata)
+            if native:
+                highlight = load_highlighter(args.root)
 
         def predict(position, row):
             tick = time.monotonic()
             generate = clients[(position + getattr(args, "question_offset", 0)) % len(clients)]
-            messages = [dict(role="system", content=system), dict(role="user", content=row["query"])]
+            messages = evaluation_messages(args, system, row['query'])
             if native:
                 with closing(NativeBrowser(retrieval, documents, highlight, args.topk, args.tool_count,
                                            search_lock=search_lock)) as tools:
                     result = run_native_agent(messages, tokenizer, generate, tools, max_turns=args.max_turns,
                                               max_context=args.max_context, max_new_tokens=args.max_new_tokens,
                                               observation_window=args.observation_window)
+            elif original:
+                tools = make_local_tools(args, retrieval, tokenizer, search_lock=search_lock)
+                result = run_agent(messages, tokenizer, generate, tools, args.max_turns, args.max_context,
+                                   args.max_new_tokens, args.max_tool_tokens, max_call_retries=args.tool_call_retries,
+                                   observation_window=args.observation_window,
+                                   record_turn_stats=True, call_protocol='research-original')
             else:
                 # Each question owns its tools and read-only connection.
                 with LocalIndex(args.root / "index.sqlite") as index:
@@ -296,7 +354,7 @@ def run_vllm_phase(args, output, rows, manifest, index_metadata=None, prompt=Non
                                        args.max_new_tokens, args.max_tool_tokens,
                                        max_call_retries=args.tool_call_retries, record_turn_stats=True)
             final_response = result["prediction"]
-            if native:
+            if native or original:
                 exact = extract_exact_answer(final_response)
                 result.update(prediction=exact, exact_answer=exact)
                 if result["status"] == "completed" and not exact:
@@ -583,7 +641,8 @@ def make_parser():
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--prompt-data", type=Path,
                         help="training JSONL providing original system/tools; default: RUN_DIR train_data_path or Polar profile")
-    parser.add_argument("--prompt-profile", choices=["legacy", "benchmark", "training", "qwen-native"], default="legacy")
+    parser.add_argument("--prompt-profile", choices=["legacy", "benchmark", "training", "qwen-native", "original", "official"], default="legacy")
+    parser.add_argument('--snippet-tokenizer-path', type=Path, help='local Qwen/Qwen3-0.6B tokenizer for official snippets')
     parser.add_argument("--prompt-date", help="fixed ISO date in the Qwen-native system prompt")
     parser.add_argument("--vllm-urls", help="comma-separated local vLLM replica URLs ending with /v1")
     parser.add_argument("--vllm-concurrency", type=int, default=32, help="concurrent questions per vLLM replica")
@@ -689,16 +748,25 @@ def run(args):
             endpoint_urls(vllm_urls)
         except ValueError as error:
             parser.error(str(error))
-        vllm_profiles = {"browsecomp-plus": "qwen-native", "hotpotqa": "benchmark"}
-        if (args.action != "run" or profile != vllm_profiles.get(args.benchmark) or args.kind != "plain"
+        vllm_profiles = {"browsecomp-plus": {'qwen-native', 'original', 'official'}, "hotpotqa": {'benchmark'}}
+        if (args.action != "run" or profile not in vllm_profiles.get(args.benchmark, set()) or args.kind != "plain"
                 or args.num_workers != 1 or args.shard_count != 1):
             parser.error("vLLM requires a baseline/plain run with the corresponding benchmark prompt and num-workers=1")
         if (args.vllm_concurrency < 1 or not math.isfinite(args.vllm_timeout) or args.vllm_timeout <= 0):
             parser.error("vLLM concurrency and timeout must be positive")
-    profiles = {"browsecomp-plus": {"legacy", "benchmark", "training", "qwen-native"},
+    profiles = {"browsecomp-plus": {"legacy", "benchmark", "training", "qwen-native", "original", "official"},
                 "hotpotqa": {"legacy", "benchmark"}}
     if profile not in profiles.get(args.benchmark, {"legacy"}):
         parser.error("prompt profile is unsupported for this benchmark")
+    if profile == 'official':
+        if args.model_origin == 'base-qwen35' or args.prompt_data:
+            parser.error('official task profile is limited to trained Plain/Beacon and does not accept PROMPT_DATA')
+        if args.topk != 5 or args.snippet_tokens != 512 or args.observation_window:
+            parser.error('official task profile requires TOPK=5, SNIPPET_TOKENS=512 and OBSERVATION_WINDOW=0')
+        if not args.snippet_tokenizer_path:
+            parser.error('official task profile requires a local Qwen3-0.6B SNIPPET_TOKENIZER_PATH')
+        if not args.snippet_tokenizer_path.is_dir():
+            parser.error('SNIPPET_TOKENIZER_PATH must be an existing local Qwen3-0.6B directory')
     if args.benchmark == "hotpotqa" and profile == "benchmark" and args.prompt_data:
         parser.error("HotpotQA benchmark prompt does not accept a prompt override")
     if profile == "qwen-native":

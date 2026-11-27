@@ -33,13 +33,16 @@ def parquet_corpus_metadata(root, manifest, verify=False):
 class ParquetCorpus:
     """Serve documents by ID or URL directly from the official Parquet snapshot."""
 
-    def __init__(self, root, metadata):
+    def __init__(self, root, metadata, *, preserve_raw=False):
+        self.manifest = metadata
         self.by_id = {}
         self.by_url = {}
         for name in sorted(metadata["files"]):
             path = root / "raw/corpus" / name
             for row in records(path, parquet_columns=["docid", "url", "text"]):
                 value = document(row, "browsecomp-plus", aligned_parquet=True)
+                if preserve_raw:
+                    value['raw_text'] = row['text']
                 docid = value.pop("id")
                 value.update(docid=docid, url="local://" + quote(docid, safe=""))
                 if docid in self.by_id:
@@ -268,6 +271,9 @@ class LuceneIndex:
 
     def search(self, query, topk):
         return [self.get(hit.docid) for hit in self.searcher.search(query, k=topk)]
+
+    def search_with_scores(self, query, topk):
+        return [dict(self.get(hit.docid), score=float(hit.score)) for hit in self.searcher.search(query, k=topk)]
 
     def get(self, docid):
         return self.documents.get(docid)

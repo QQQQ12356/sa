@@ -68,6 +68,20 @@ def resolve_system_prompt(prompt_data=None, run_dir=None):
     return system, str(path)
 
 
+def resolve_original_system_prompt(prompt_data=None, run_dir=None):
+    """Require one preserved export system, with no added local/native instructions."""
+    if prompt_data is None and run_dir is None:
+        raise ValueError('original profile requires PROMPT_DATA or TRAINING_RUN')
+    system, source = resolve_system_prompt(prompt_data, run_dir)
+    with Path(source).open(encoding='utf-8') as stream:
+        for line in stream:
+            if line.strip():
+                row = json.loads(line)
+                if row.get('system_prompt_mode') != 'original' or row.get('call_protocol') != 'research-original':
+                    raise ValueError('original profile requires browsecomp-sft prepared with SYSTEM_PROMPT_MODE=original')
+    return system, source
+
+
 def build_system_prompt(*, system=None, allow_visit=True, local=False, answer_instruction=""):
     """Online returns the original bytes. Local changes only tool capabilities."""
     prompt = DEFAULT_SYSTEM_FILE.read_text() if system is None else system

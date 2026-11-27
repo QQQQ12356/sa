@@ -13,7 +13,7 @@ from search_comp.evaluation.benchmark_resume import publish_continuation
 from search_comp.evaluation.checkpoints import load_evaluation_model, resolve_checkpoint
 from search_comp.evaluation.tool_agent import ModelGenerator, decoding_options, run_agent
 from search_comp.offline.index import LocalIndex
-from search_comp.offline.tools import LocalTools
+from search_comp.offline.tools import LocalTools, OriginalLocalTools
 from search_comp.utils.progress import CompletionProgress
 from .benchmarks import resolve_target
 from .runtime import configure, digest, job, path, read_json, stamp, write_json
@@ -42,13 +42,19 @@ def read_samples(filename, limit, allow_visit):
                 raise ValueError(f"评测记录缺少问题或比较答案: {sample_id}")
             ids.add(sample_id)
             system = render_system(messages[0]["content"], row.get("tools"))
+            original = row.get('call_protocol') == 'research-original'
             tool_block = TOOLS_RE.search(system)
             visit = bool(allow_visit and tool_block and re.search(r'"name"\s*:\s*"visit"', tool_block[1]))
-            system = build_system_prompt(system=system, local=True, allow_visit=visit)
+            if original:
+                visit = allow_visit
+            else:
+                system = build_system_prompt(system=system, local=True, allow_visit=visit)
             samples.append(dict(id=sample_id, query=question, answer=answer, system=system,
                                 allow_visit=visit, source=row.get("source"),
                                 answer_source=row.get("answer_source") or "reference",
                                 correctness=row.get("correctness")))
+            if original:
+                samples[-1]['call_protocol'] = 'research-original'
     if not samples:
         raise ValueError(f"所选评测划分为空: {filename}")
     return samples, fingerprint.hexdigest()
@@ -160,13 +166,15 @@ def generate_predictions(samples, predictions, args, index, run, model_path, kin
     with predictions.open("x", encoding="utf-8") as stream:
         for number, sample in enumerate(samples):
             started = time.monotonic()
-            tools = LocalTools(index, tokenizer, args.topk, args.snippet_tokens, args.read_tokens,
+            tool_class = OriginalLocalTools if sample.get('call_protocol') == 'research-original' else LocalTools
+            tools = tool_class(index, tokenizer, args.topk, args.snippet_tokens, args.read_tokens,
                                sample["allow_visit"], args.tool_count)
             messages = [dict(role="system", content=sample["system"]),
                         dict(role="user", content=sample["query"])]
             result = run_agent(messages, tokenizer, generate, tools, args.max_turns,
                                args.max_context, args.max_new_tokens, args.max_tool_tokens,
-                               max_call_retries=args.tool_call_retries)
+                               max_call_retries=args.tool_call_retries,
+                               call_protocol=sample.get('call_protocol', 'openseeker'))
             result.update({k: v for k, v in sample.items() if k != "system"})
             scores = answer_metrics([sample], [result])
             result.update(sample_index=number, seconds=time.monotonic() - started,

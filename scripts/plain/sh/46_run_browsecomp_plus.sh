@@ -29,6 +29,18 @@ export SA_RESUME_FROM=''  # 从已完成评测扩展题数时填写旧评测根�
 export SA_EVALUATION_DIR=''  # 填已有评测根目录时，仅重新评分。
 export SA_SCORE_AFTER_GENERATION=false  # EVALUATION_DIR 为空时生效。false 仅生成。
 
+# 固定浏览器协议。官方任务用 48；原始 SFT 协议用 49，不能在此切换 profile。
+export SA_GENERATION__PROMPT_PROFILE=qwen-native
+export SA_GENERATION__SNIPPET_TOKENIZER_PATH=''  # 仅 48 官方任务入口使用。
+export SA_PROMPT_DATA=''  # 浏览器固定提示词，不接受覆盖。
+export SA_GENERATION__NUM_WORKERS=1
+# 以下长度仅 original 使用；qwen-native 的摘要由浏览器生成。
+export SA_GENERATION__SNIPPET_TOKENS=512
+export SA_GENERATION__READ_TOKENS=4096
+export SA_GENERATION__MAX_TOOL_TOKENS=32768
+export SA_GENERATION__TOOL_CALL_RETRIES=1
+export SA_GENERATION__ALLOW_VISIT=true
+
 # 推理端口支持逗号分隔的本机副本。每个副本最多同时处理 32 题。
 export SA_GENERATION__VLLM_URLS=http://127.0.0.1:8020/v1
 export SA_GENERATION__VLLM_CONCURRENCY=32

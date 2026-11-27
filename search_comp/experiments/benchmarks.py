@@ -122,7 +122,15 @@ def evaluate(*, method, benchmark, benchmark_dir, training_run, model_path, prom
     dataset_name, training_run, model, kind, origin = resolve_target(method, training_run, model_path, checkpoint)
     spec = read_json(training_run / "experiment.json") if training_run else {}
     profile = generation.get("prompt_profile")
-    shared_prompt = (benchmark == "browsecomp-plus" and profile in {"benchmark", "qwen-native"}
+    if profile == 'official' and (method not in {'plain', 'beacon'} or benchmark != 'browsecomp-plus'):
+        raise ValueError('official task profile is limited to Plain/Beacon BrowseComp-Plus')
+    if profile == 'official':
+        modes = {mode for mode in spec.get('dataset_manifest', {}).get('prompt_modes', {})
+                 if mode.startswith('official')}
+        expected_mode = 'official-read' if generation.get('allow_visit') else 'official'
+        if len(modes) == 1 and expected_mode not in modes:
+            raise ValueError('官方任务训练与评测的 get_document 能力不同，请对齐 ALLOW_VISIT 与主分片模式')
+    shared_prompt = (benchmark == "browsecomp-plus" and profile in {"benchmark", "qwen-native", "official"}
                      or benchmark == "hotpotqa" and profile == "benchmark")
     if shared_prompt and prompt_data:
         raise ValueError("SA_PROMPT_DATA requires the training prompt profile")

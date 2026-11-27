@@ -23,6 +23,15 @@ export CUDA_VISIBLE_DEVICES=0
 # SOURCE：固定 browsecomp-sft，输出到 artifacts/datasets/browsecomp-sft/prepared/<PROFILE>/。
 export SA_SOURCE=browsecomp-sft
 
+# by-shard 按主/辅助分片分别处理；也可统一指定旧 normalized 或 original。
+# 切换后更换 PROFILE 并重新计长。
+export SA_SYSTEM_PROMPT_MODE=by-shard
+# 主分片：official 对齐官方 search-only 任务；official-read 额外保留 get_document 轨迹。
+# normalized/original 仍可选。官方模式不会编造缺失的回答字段，不支持的轨迹会拒绝。
+export SA_MAIN_PROMPT_MODE=official
+# 辅助分片仅 normalized/original，不能冒充官方 BrowseComp-Plus 主任务轨迹。
+export SA_PLANNER_PROMPT_MODE=normalized
+
 # SNAPSHOT_DIR：下载输出的 commit 目录；按 SHARDS 选择分片；与 INPUTS 互斥
 export SA_SNAPSHOT_DIR=''
 

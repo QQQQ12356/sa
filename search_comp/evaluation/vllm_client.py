@@ -60,8 +60,8 @@ class VllmClient:
     def __call__(self, inputs, budget, *, stop_texts=None):
         import httpx
 
-        include_stop = stop_texts is None
-        if include_stop:
+        include_stop = stop_texts is None or '</tool_call>' in stop_texts
+        if stop_texts is None:
             from search_comp.data.openseeker import CALL_END
 
             stop_texts = (CALL_END, "</answer>")

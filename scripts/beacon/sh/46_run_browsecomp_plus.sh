@@ -18,7 +18,7 @@ export SA_BENCHMARK_DIR=artifacts/benchmarks/browsecomp-plus/v2
 # 填写本方法的 Qwen3.5-4B 训练实验根目录。
 export SA_TRAINING_RUN=artifacts/experiments/beacon/openseeker/REPLACE_WITH_RUN
 export SA_CHECKPOINT=''  # 空值使用最终模型；也可填 checkpoint-200。
-export SA_PROMPT_DATA=''  # 仅 training 用；可填规范化 JSONL。
+export SA_PROMPT_DATA=''  # 浏览器固定提示词，不接受覆盖。
 export SA_RUN_NAME=beacon-bcp4b
 export SA_OVERLAP=off  # off 保留完整题集；filter 对训练实验排除重合题。
 export SA_OVERLAP_THRESHOLD=0.30
@@ -27,8 +27,10 @@ export SA_EVALUATION_DIR=''  # 填已有评测根目录时，仅重新评分。
 export SA_SCORE_AFTER_GENERATION=false  # EVALUATION_DIR 为空时生效。false 仅生成。
 
 # 与 Baseline/Plain 共用原生浏览器协议；本地 Beacon 推理压缩工具正文。
-# benchmark/training 仅供旧实验复现。
+# 旧实验入口另行保留，本入口只运行浏览器实验。
+# 固定浏览器协议。官方任务用 48；原始 SFT 协议用 49，不能在此切换 profile。
 export SA_GENERATION__PROMPT_PROFILE=qwen-native
+export SA_GENERATION__SNIPPET_TOKENIZER_PATH=''  # 仅 48 官方任务入口使用。
 export SA_GENERATION__PROMPT_DATE=''  # YYYY-MM-DD；对照实验固定同一天。
 
 # -1 全量；初次运行可改为 5。每个 worker 占用一张可见 GPU 并加载一份模型。

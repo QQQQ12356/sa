@@ -10,6 +10,8 @@
 
 三种方法的推荐评测入口共享题集、提示词、工具和默认预算。BrowseComp-Plus 支持官方 Lucene BM25 与 Qwen3-Embedding-8B；HotpotQA 使用 SQLite BM25。Baseline/Plain 由本机 vLLM 推理，Beacon 在 cu126 环境中本地加载压缩模型。Beacon 的压缩配置从训练检查点读取。完整步骤分别见 [BrowseComp-Plus](docs/32_browsecomp_plus_vllm.md) 和 [HotpotQA](docs/37_hotpotqa_vllm.md)。
 
+Plain/Beacon 的 BrowseComp-Plus 浏览器实验使用 46，官方任务对齐实验使用 48，原始 SFT 协议实验使用 49；入口固定协议。BrowseComp-Plus SFT 主/辅助分片分别处理，见 [数据接入](docs/21_browsecomp_sft.md#主分片的官方任务对齐)。Baseline 保持现有入口。
+
 ## 文档导航
 
 按用途保留以下核心文档，参数含义以参数手册与对应专题为准；每份 Bash 脚本列出该入口的实际默认值。
@@ -17,7 +19,7 @@
 | 分类 | 核心文档 | 阅读目的 |
 |---|---|---|
 | 安装 | [10 环境](docs/10_environment.md) | cu126、Java、独立 vLLM 环境及依赖 |
-| 数据 | [20 数据准备](docs/20_data.md) · [21 BrowseComp SFT](docs/21_browsecomp_sft.md) · [35 检索索引](docs/35_browsecomp_plus_dense.md) | 模型、训练集、题集、BM25 和向量索引 |
+| 数据 | [20 数据准备](docs/20_data.md) · [21 BrowseComp-Plus SFT](docs/21_browsecomp_sft.md) · [35 检索索引](docs/35_browsecomp_plus_dense.md) | 模型、训练集、题集、BM25 和向量索引 |
 | 训练 | [30 Plain](docs/30_plain.md) · [31 Beacon](docs/31_beacon.md) | 训练计划、配置和压缩参数 |
 | 评测 | [32 BrowseComp-Plus](docs/32_browsecomp_plus_vllm.md) · [37 HotpotQA](docs/37_hotpotqa_vllm.md) | 三方法的生成、评分与公平对照 |
 | 评测维护 | [33 检查点](docs/33_checkpoint_evaluation.md) · [34 训练轨迹评测](docs/34_training_data_evaluation.md) · [36 续测与恢复](docs/36_browsecomp_plus_resume.md) | 周期权重、训练诊断和扩充题数 |

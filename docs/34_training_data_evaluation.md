@@ -39,7 +39,7 @@ export SA_GENERATION__LIMIT=10
 | `HF_HUB_OFFLINE` | `1` | 优先按默认值使用本地模型文件和缓存。 |
 | `CUDA_VISIBLE_DEVICES` | `0` | 单进程模型推理使用的可见设备，建议指定一个 GPU。 |
 | `SA_METHOD` | `plain` | 选 `plain` 或 `beacon`，与训练实验记录一致。 |
-| `SA_TRAINING_RUN` | 实验目录占位路径 | 必填，填写训练实验根目录。Plain、Beacon 的 OpenSeeker、Research、BrowseComp SFT 和 mixed 实验都可以使用。 |
+| `SA_TRAINING_RUN` | 实验目录占位路径 | 必填，填写训练实验根目录。Plain、Beacon 的 OpenSeeker、Research、BrowseComp-Plus SFT 和 mixed 实验都可以使用。 |
 | `SA_CHECKPOINT` | 空 | 留空加载成功完成训练的最终模型。也可填 `checkpoint-200`，或当前实验下该周期检查点的完整路径。 |
 | `SA_DATASET_DIR` | 空 | 留空从训练实验记录定位划分，并验证数据 SHA256。填写时读取给定 prepared 目录下的 `<SPLIT>.jsonl`。可用项目相对路径或 Linux 绝对路径。 |
 | `SA_SPLIT` | `train` | 可选 `train`、`validation`、`test`。所选文件至少有一条当前协议的轨迹。 |

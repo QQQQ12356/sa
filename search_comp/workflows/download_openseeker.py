@@ -65,7 +65,7 @@ def run(args):
                 jsonl_inputs.append(str(path.resolve()))
         parquet_inputs = [str((directory / name).resolve()) for name in SHARDS] if source == SOURCE else []
         if source == SOURCE and any(not Path(name).is_file() for name in parquet_inputs):
-            raise ValueError('BrowseComp SFT snapshot is missing a required shard')
+            raise ValueError('BrowseComp-Plus SFT snapshot is missing a required shard')
         if not (jsonl_inputs or parquet_inputs):
             raise ValueError('snapshot contains no supported JSONL/Parquet data files')
         (directory/'download_manifest.json').write_text(json.dumps(dict(repo=repo,revision=info.sha,

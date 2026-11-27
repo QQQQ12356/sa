@@ -9,6 +9,9 @@ SCHEMA = {'ENVIRONMENT__HF_ENDPOINT': {'env': 'HF_ENDPOINT', 'type': 'str'},
  'ENVIRONMENT__HF_HUB_OFFLINE': {'env': 'HF_HUB_OFFLINE', 'type': 'str'},
  'ENVIRONMENT__CUDA_VISIBLE_DEVICES': {'env': 'CUDA_VISIBLE_DEVICES', 'type': 'str'},
  'SOURCE': {'env': 'SA_SOURCE', 'type': 'str'},
+ 'SYSTEM_PROMPT_MODE': {'env': 'SA_SYSTEM_PROMPT_MODE', 'type': 'str'},
+ 'MAIN_PROMPT_MODE': {'env': 'SA_MAIN_PROMPT_MODE', 'type': 'str'},
+ 'PLANNER_PROMPT_MODE': {'env': 'SA_PLANNER_PROMPT_MODE', 'type': 'str'},
  'SNAPSHOT_DIR': {'env': 'SA_SNAPSHOT_DIR', 'type': 'str'},
  'INPUTS': {'env': 'SA_INPUTS', 'type': 'list'},
  'SHARDS': {'env': 'SA_SHARDS', 'type': 'list'},
@@ -36,4 +39,6 @@ if __name__ == "__main__":
                     correctness=CORRECTNESS, observations=OBSERVATIONS, workers=WORKERS, seed=SEED,
                     val_fraction=VAL_FRACTION, test_fraction=TEST_FRACTION, offline=OFFLINE,
                     environment=ENVIRONMENT, shards=SHARDS, canonical_questions=CANONICAL_QUESTIONS,
-                    protected_questions=PROTECTED_QUESTIONS, overlap_threshold=OVERLAP_THRESHOLD)
+                    protected_questions=PROTECTED_QUESTIONS, overlap_threshold=OVERLAP_THRESHOLD,
+                    system_prompt_mode=SYSTEM_PROMPT_MODE,
+                    main_prompt_mode=MAIN_PROMPT_MODE, planner_prompt_mode=PLANNER_PROMPT_MODE)

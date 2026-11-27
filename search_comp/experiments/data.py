@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from search_comp.data.browsecomp_sft import REPO, SHARDS, SOURCE
+from search_comp.data.browsecomp_sft import REPO, SHARDS, SOURCE, SYSTEM_PROMPT_MODES
 from .runtime import ROOT, configure, digest, job, path, read_json, slug, stamp, write_json
 
 
@@ -27,20 +27,23 @@ def download_dataset(*, source, revision, environment):
 def prepare_dataset(*, dataset_name, source, snapshot_dir, inputs, profile, models, max_length,
                     min_length, correctness, observations, workers, seed, val_fraction,
                     test_fraction, offline, environment, shards=(), canonical_questions=None,
-                    protected_questions=(), overlap_threshold=0.30):
+                    protected_questions=(), overlap_threshold=0.30, system_prompt_mode='normalized',
+                    main_prompt_mode='official', planner_prompt_mode='normalized'):
     configure(environment)
     if source not in DATASET_SOURCES.get(dataset_name, ()):
         raise ValueError("SOURCE 与 DATASET_NAME 不一致")
+    if system_prompt_mode not in SYSTEM_PROMPT_MODES or system_prompt_mode != 'normalized' and source != SOURCE:
+        raise ValueError('invalid SYSTEM_PROMPT_MODE for this source')
     if snapshot_dir and inputs:
         raise ValueError("SNAPSHOT_DIR 和 INPUTS 只能填写一个")
     if snapshot_dir:
         snapshot = read_json(path(snapshot_dir) / "download_manifest.json")
         if source == SOURCE:
             if snapshot["repo"] != REPO or not shards or not set(shards) <= set(SHARDS):
-                raise ValueError("请选择正确的 BrowseComp SFT 快照和 SA_SHARDS")
+                raise ValueError("请选择正确的 BrowseComp-Plus SFT 快照和 SA_SHARDS")
             inputs = [p for p in snapshot["parquet_inputs"] if path(p).name in shards]
             if {path(p).name for p in inputs} != set(shards):
-                raise ValueError("BrowseComp SFT 快照清单缺少所选 SA_SHARDS，请重新下载")
+                raise ValueError("BrowseComp-Plus SFT 快照清单缺少所选 SA_SHARDS，请重新下载")
         else:
             inputs = snapshot["jsonl_inputs"]
     inputs = [path(p) for p in inputs]
@@ -56,6 +59,8 @@ def prepare_dataset(*, dataset_name, source, snapshot_dir, inputs, profile, mode
                    observations=observations, tokenizer=None)
     if source == SOURCE:
         options.update(canonical_questions=str(path(canonical_questions)) if canonical_questions else None,
+                       system_prompt_mode=system_prompt_mode,
+                       main_prompt_mode=main_prompt_mode, planner_prompt_mode=planner_prompt_mode,
                        protected_questions=[str(path(p)) for p in protected_questions],
                        overlap_threshold=overlap_threshold,
                        snapshot_revision=snapshot["revision"] if snapshot_dir else None)

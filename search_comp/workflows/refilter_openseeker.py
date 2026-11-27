@@ -26,7 +26,9 @@ def run(args):
     options.update({k: v for k, v in vars(args).items() if k not in ('prepared', 'output')})
     # Published split membership must be retained: recover from original input paths.
     from search_comp.workflows.prepare_openseeker import row_adapter, rows
-    adapter = row_adapter(options.get('source'))
+    prompt_options = {key: options[key] for key in ('system_prompt_mode', 'main_prompt_mode', 'planner_prompt_mode')
+                      if key in options}
+    adapter = row_adapter(options.get('source'), prompt_options or 'normalized')
     fixed={}
     for s in options['input']:
         path=Path(s)

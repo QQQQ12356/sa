@@ -14,8 +14,10 @@
 |---|---|---|
 | OpenSeeker | `scripts/plain/sh/10_train_openseeker.sh` | `artifacts/datasets/openseeker/prepared/<PROFILE>` |
 | Research | `scripts/plain/sh/11_train_research.sh` | `artifacts/datasets/research/prepared/<PROFILE>` |
-| [BrowseComp SFT](21_browsecomp_sft.md) | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=browsecomp-sft` | `artifacts/datasets/browsecomp-sft/prepared/<PROFILE>` |
+| [BrowseComp-Plus SFT](21_browsecomp_sft.md) | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=browsecomp-sft` | `artifacts/datasets/browsecomp-sft/prepared/<PROFILE>` |
 | [混合数据](20_data.md#5-可选混合-openseeker-与-research) | `scripts/plain/sh/11_train_research.sh`，设 `SA_DATASET_NAME=mixed` | `artifacts/datasets/mixed/prepared/<PROFILE>` |
+
+BrowseComp-Plus SFT 支持保留原始 system 与调用协议：预处理设 `SA_SYSTEM_PROMPT_MODE=original`，训练使用新数据版本，49 号原始协议评测使用 `SA_GENERATION__PROMPT_PROFILE=original`。主分片默认按官方任务适配，辅助分片独立处理；46/48/49 分别为浏览器/官方任务/原始协议入口。详见 [原始 system 训练与推理](21_browsecomp_sft.md#保留原始-system-的训练与推理)。
 
 在选定文件中修改：
 

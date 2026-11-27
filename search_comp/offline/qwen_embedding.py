@@ -156,13 +156,16 @@ class DenseIndex:
         self.encoder = Encoder(model_dir, device)
 
     def search(self, query, topk=5):
+        return [self.get(hit['docid']) for hit in self.search_with_scores(query, topk)]
+
+    def search_with_scores(self, query, topk=5):
         import numpy as np
 
         if not isinstance(query, str) or not query.strip() or topk < 1:
             raise ValueError("query must be text and topk must be positive")
         vector = self.encoder.encode([QUERY_PREFIX + query], QUERY_MAX_LENGTH)
-        _, ranking = self.index.search(np.ascontiguousarray(vector, dtype=np.float32), min(topk, len(self.docids)))
-        return [self.get(self.docids[i]) for i in ranking[0]]
+        scores, ranking = self.index.search(np.ascontiguousarray(vector, dtype=np.float32), min(topk, len(self.docids)))
+        return [dict(self.get(self.docids[i]), score=float(score)) for score, i in zip(scores[0], ranking[0])]
 
     def get(self, docid):
         return self.documents.get(docid)

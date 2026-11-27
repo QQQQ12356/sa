@@ -3,6 +3,7 @@
 No GPU or model weights are loaded. Run from the project root.
 """
 from collections import Counter, defaultdict
+from functools import partial
 from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
@@ -13,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from search_comp.data.openseeker import normalize, encode, parse_calls, VERSION
 from search_comp.data.research import normalize_research, ADAPTER_VERSION
-from search_comp.data.browsecomp_sft import REPO, SOURCE, normalize_browsecomp_sft
+from search_comp.data.browsecomp_sft import REPO, SOURCE, SYSTEM_PROMPT_MODES, normalize_browsecomp_sft
 from search_comp.data.question_overlap import QuestionIndex
 
 MODELS = ['Qwen/Qwen3-4B-Thinking-2507', 'Qwen/Qwen3.5-4B']
@@ -43,8 +44,9 @@ def stats(values):
                 **{f'over_{n}': int((x > n).sum()) for n in (8192, 16384, 32768, 65536)})
 
 
-def initialize(models, offline):
-    global TOKENIZERS
+def initialize(models, offline, system_prompt_mode='normalized'):
+    global TOKENIZERS, SYSTEM_PROMPT_MODE
+    SYSTEM_PROMPT_MODE = system_prompt_mode
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     from transformers import AutoTokenizer
     TOKENIZERS = {m: AutoTokenizer.from_pretrained(m, local_files_only=offline) for m in models}
@@ -53,20 +55,23 @@ def initialize(models, offline):
 def measure(item):
     source, index, raw = item
     try:
-        adapter = row_adapter(source.split('/')[0])
+        adapter = row_adapter(source.split('/')[0], globals().get('SYSTEM_PROMPT_MODE', 'normalized'))
         row = adapter(raw, source, index)
         lengths = {}
         for name, tok in TOKENIZERS.items():
-            encoded = encode(row['messages'], tok, tools=row.get('tools'))
+            encoded = encode(row['messages'], tok, tools=row.get('tools'),
+                             call_protocol=row.get('call_protocol', 'openseeker'))
             lengths[name] = dict(total=len(encoded['input_ids']),
                                  observations=sum(b-a for a,b in encoded['regions']),
                                  assistant=sum(v != -100 for v in encoded['labels']))
         row['lengths'] = lengths
-        calls = [c for m in row['messages'] if m['role'] == 'assistant' for c in parse_calls(m['content'])]
+        calls = [c for m in row['messages'] if m['role'] == 'assistant'
+                 for c in parse_calls(m['content'], row.get('call_protocol', 'openseeker'))]
         facts = dict(roles=Counter(m['role'] for m in row['messages']),
                      tools=Counter(c['name'] for c in calls),
                      calls=len(calls), messages=len(row['messages']),
                      cjk=any('\u4e00' <= c <= '\u9fff' for c in row['question']),
+                     sft_shard=row.get('sft_shard'), system_prompt_mode=row.get('system_prompt_mode'),
                      correctness=row['correctness'] or 'unspecified')
         return row, facts, None
     except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
@@ -76,8 +81,12 @@ def measure(item):
 def dump(f, obj):
     f.write(json.dumps(obj, ensure_ascii=False) + '\n')
 
-def row_adapter(source):
-    return {'research': normalize_research, SOURCE: normalize_browsecomp_sft}.get(source, normalize)
+def row_adapter(source, system_prompt_mode='normalized'):
+    if source == SOURCE:
+        if isinstance(system_prompt_mode, dict):
+            return partial(normalize_browsecomp_sft, **system_prompt_mode)
+        return partial(normalize_browsecomp_sft, system_prompt_mode=system_prompt_mode)
+    return {'research': normalize_research}.get(source, normalize)
 
 
 def prepare_sft_input(raw, canonical, protected):
@@ -103,11 +112,25 @@ def run(args):
     p = ConfigError()
     if args.workers < 1 or args.max_length < 1:
         p.error('workers and max-length must be positive')
+    system_prompt_mode = getattr(args, 'system_prompt_mode', 'normalized')
+    if system_prompt_mode not in SYSTEM_PROMPT_MODES or system_prompt_mode != 'normalized' and args.source != SOURCE:
+        p.error('invalid SYSTEM_PROMPT_MODE for this source')
+    prompt_options = system_prompt_mode
+    if system_prompt_mode == 'by-shard':
+        prompt_options = dict(system_prompt_mode=system_prompt_mode,
+            main_prompt_mode=getattr(args, 'main_prompt_mode', 'official'),
+            planner_prompt_mode=getattr(args, 'planner_prompt_mode', 'normalized'))
+        if (prompt_options['main_prompt_mode'] not in SYSTEM_PROMPT_MODES - {'by-shard'}
+                or prompt_options['planner_prompt_mode'] not in {'normalized', 'original'}):
+            p.error('invalid MAIN_PROMPT_MODE/PLANNER_PROMPT_MODE')
     selection = selection_from_args(args)
     if not 0 <= args.val_fraction + args.test_fraction < 1 or min(args.val_fraction, args.test_fraction) < 0:
         p.error('invalid split fractions')
     # Validate tokenizer availability before creating output artifacts.
-    initialize(args.models, args.offline)
+    if args.source == SOURCE:
+        initialize(args.models, args.offline, prompt_options)
+    else:
+        initialize(args.models, args.offline)
     if args.tokenizer and args.tokenizer not in args.models:
         p.error('requested tokenizer was not measured')
     if args.source == SOURCE:
@@ -125,13 +148,14 @@ def run(args):
             p.error('data.parquet requires SA_CANONICAL_QUESTIONS')
     args.output.mkdir(parents=True, exist_ok=False)
     counters = Counter(); roles = Counter(); tools = Counter(); correctness = Counter()
+    sft_shards = Counter(); prompt_modes = Counter()
     metrics = defaultdict(list); seen = set(); known_splits = {}
     # Preserve published validation questions, even if duplicated in train.
     for path in args.input:
         if path.stem in ('val', 'validation', 'test'):
             for i, raw in enumerate(rows(path)):
                 try:
-                    adapter = row_adapter(args.source)
+                    adapter = row_adapter(args.source, prompt_options)
                     key = adapter(raw, args.source, i)['question_id']
                     known_splits[key] = 'test' if path.stem == 'test' else 'validation'
                 except (ValueError, KeyError, TypeError):
@@ -160,7 +184,7 @@ def run(args):
                ('normalized', 'train', 'validation', 'test', 'rejected', 'measurements')}
     try:
         with ProcessPoolExecutor(args.workers, initializer=initialize,
-                                 initargs=(args.models, args.offline)) as pool:
+                                 initargs=(args.models, args.offline, prompt_options)) as pool:
             # Bounded chunks keep memory stable for multi-GB input.
             from itertools import islice
             stream = iter(items())
@@ -172,6 +196,9 @@ def run(args):
                     dump(handles['normalized'], row)
                     roles.update(facts['roles']); tools.update(facts['tools'])
                     correctness[facts['correctness']] += 1
+                    if facts.get('sft_shard'):
+                        sft_shards[facts['sft_shard']] += 1
+                        prompt_modes[facts['system_prompt_mode']] += 1
                     counters['questions_with_cjk'] += facts['cjk']
                     for k in ('calls', 'messages'):
                         metrics[k].append(facts[k])
@@ -207,8 +234,10 @@ def run(args):
                         dataset_id='AmanPriyanshu/tool-reasoning-sft-RESEARCH-OpenSeeker-v1-Data',
                         note='Held-out demonstrations are not independent benchmark gold answers.')
     elif args.source == SOURCE:
-        manifest.update(adapter_version='browsecomp-sft-v1', training_only=True,
-                        dataset_id=REPO, question_references=reference_digests)
+        manifest.update(adapter_version='browsecomp-sft-v3', training_only=True,
+                        system_prompt_mode=system_prompt_mode, dataset_id=REPO,
+                        sft_shards=dict(sft_shards), prompt_modes=dict(prompt_modes),
+                        question_references=reference_digests)
     for path in args.input:
         h = hashlib.sha256()
         with path.open('rb') as f:

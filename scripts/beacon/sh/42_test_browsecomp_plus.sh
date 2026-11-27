@@ -33,7 +33,7 @@ export SA_CHECKPOINT=''
 export SA_MODEL_PATH=''
 
 # PROMPT_DATA：通常留空，由 TRAINING_RUN 提供提示词。
-# mixed 实验必填；BrowseComp SFT 同时使用两个分片时也可显式选择单一 system/tools 的规范化 JSONL。
+# mixed 实验必填；BrowseComp-Plus SFT 同时使用两个分片时也可显式选择单一 system/tools 的规范化 JSONL。
 export SA_PROMPT_DATA=''
 
 # OVERLAP：filter 在加载模型前按实际训练集筛掉同题；off 保留全部题。

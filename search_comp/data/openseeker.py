@@ -30,24 +30,29 @@ def json_text(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def parse_calls(text):
+def parse_calls(text, protocol='openseeker'):
     """Reject incomplete or malformed action blocks instead of scoring them as answers."""
+    if protocol not in {'openseeker', 'research-original'}:
+        raise ValueError(f'unsupported call protocol: {protocol}')
     found = CALL_RE.findall(text)
     if not found:
         if any(tag in text for tag in ('<tool_call', '</tool_call')):
             raise ValueError('incomplete tool call')
         return []
-    if text.count(CALL_BEGIN) != 1 or text.count(CALL_END) != 1:
-        raise ValueError('missing/duplicate tool-call envelope')
-    block = text.split(CALL_BEGIN, 1)[1].split(CALL_END, 1)[0]
-    if CALL_RE.sub('', block).strip() or len(CALL_RE.findall(block)) != len(found):
-        raise ValueError('invalid tool-call envelope')
+    if protocol == 'openseeker' or CALL_BEGIN in text or CALL_END in text:
+        if text.count(CALL_BEGIN) != 1 or text.count(CALL_END) != 1:
+            raise ValueError('missing/duplicate tool-call envelope')
+        block = text.split(CALL_BEGIN, 1)[1].split(CALL_END, 1)[0]
+        if CALL_RE.sub('', block).strip() or len(CALL_RE.findall(block)) != len(found):
+            raise ValueError('invalid tool-call envelope')
+    if text.count('<tool_call>') != len(found) or text.count('</tool_call>') != len(found):
+        raise ValueError('incomplete tool call')
     calls = []
     for raw in found:
         call = json.loads(raw)
         if not isinstance(call, dict) or not isinstance(call.get('name'), str):
             raise ValueError('invalid tool name')
-        args = call.get('arguments')
+        args = call.get('arguments', call.get('parameters')) if protocol == 'research-original' else call.get('arguments')
         if isinstance(args, str):
             args = json.loads(args)
         if not isinstance(args, dict):
@@ -135,12 +140,15 @@ def normalize(row, source='unknown', index=0):
                   source=source, source_index=index,
                   correctness=row.get('trajectory correctness'),
                   declared_tool_calls=row.get('number of tool calls', row.get('n_tool_calls')))
+    if 'call_protocol' in row:
+        result['call_protocol'] = row['call_protocol']
     validate(result)
     return result
 
 
 def validate(row):
     messages = row['messages']
+    call_protocol = row.get('call_protocol', 'openseeker')
     if len(messages) < 3 or [m['role'] for m in messages[:2]] != ['system', 'user']:
         raise ValueError('expected system, question, assistant trajectory')
     pending = False
@@ -149,7 +157,7 @@ def validate(row):
         if m['role'] == 'assistant':
             if pending and not observed:
                 raise ValueError('tool call without observation')
-            pending = bool(parse_calls(m['content']))
+            pending = bool(parse_calls(m['content'], call_protocol))
             observed = False
         elif m['role'] == 'user':
             if not pending or not RESPONSE_RE.search(m['content']):
@@ -159,7 +167,7 @@ def validate(row):
             observed = True
         else:
             raise ValueError('unexpected role')
-    if messages[-1]['role'] != 'assistant' or parse_calls(messages[-1]['content']):
+    if messages[-1]['role'] != 'assistant' or parse_calls(messages[-1]['content'], call_protocol):
         raise ValueError('incomplete final answer')
     if not isinstance(row.get('answer'), str) or not row['answer'].strip():
         raise ValueError('expected nonempty string reference answer')
@@ -185,7 +193,7 @@ def pieces(messages, generation_prompt=False, *, start=0):
 
 
 def encode(messages, tokenizer, generation_prompt=False, loss_segments=None,
-           return_loss_segment_ids=False, tools=None, allow_invalid_calls=False):
+           return_loss_segment_ids=False, tools=None, allow_invalid_calls=False, call_protocol='openseeker'):
     from ..loss_segments import (LossSegmentConfig, SEGMENT_IGNORE, SEGMENT_IDS,
                                  classify_assistant_text)
     loss = LossSegmentConfig.from_dict(loss_segments)
@@ -211,7 +219,7 @@ def encode(messages, tokenizer, generation_prompt=False, loss_segments=None,
     for message in messages:
         if message['role'] == 'assistant':
             try:
-                n_calls += len(parse_calls(message['content']))
+                n_calls += len(parse_calls(message['content'], call_protocol))
             except ValueError:
                 if not allow_invalid_calls:
                     raise
@@ -254,7 +262,8 @@ class OpenSeekerDataset:
         row = normalize(row, index=index)
         validate(row)
         sample = encode(row['messages'], self.tokenizer, loss_segments=self.loss_segments,
-                        return_loss_segment_ids=self.return_loss_segment_ids, tools=row.get('tools'))
+                        return_loss_segment_ids=self.return_loss_segment_ids, tools=row.get('tools'),
+                        call_protocol=row.get('call_protocol', 'openseeker'))
         if len(sample['input_ids']) > self.max_length:
             raise ValueError(f"{row['id']}: exceeds max_length={self.max_length}; run prepare first")
         return sample

@@ -248,7 +248,8 @@ def extract_response(text):
 
 def run_agent(messages, tokenizer, generate, tools, max_turns=32,
               max_context=16384, max_new_tokens=8192, max_tool_tokens=8192, tool_schemas=None,
-              log=None, max_call_retries=0, observation_window=0, record_turn_stats=False):
+              log=None, max_call_retries=0, observation_window=0, record_turn_stats=False,
+              call_protocol='openseeker'):
     # Only the original system/question enter inference; no reference is injected.
     history = [dict(message) for message in messages[:2]]
     history[0]['content'] = render_system(history[0]['content'], tool_schemas)
@@ -278,8 +279,9 @@ def run_agent(messages, tokenizer, generate, tools, max_turns=32,
             invalidate = getattr(generate, 'invalidate_history', None)
             if invalidate is not None:
                 invalidate()
-        if encode_turn is None:
-            encoded = encode(context, tokenizer, generation_prompt=True, allow_invalid_calls=max_call_retries > 0)
+        if encode_turn is None or call_protocol != 'openseeker':
+            encoded = encode(context, tokenizer, generation_prompt=True, allow_invalid_calls=max_call_retries > 0,
+                             call_protocol=call_protocol)
         else:
             encoded = encode_turn(context, allow_invalid_calls=max_call_retries > 0)
         available = max_context - len(encoded['input_ids'])
@@ -290,7 +292,11 @@ def run_agent(messages, tokenizer, generate, tools, max_turns=32,
         if log:
             log(f"turn={turn + 1}/{max_turns} generation start input_tokens={len(encoded['input_ids'])} max_new_tokens={budget}")
         try:
-            text, ended, n_tokens = generate(encoded, budget)
+            if call_protocol == 'research-original':
+                text, ended, n_tokens = generate(encoded, budget,
+                    stop_texts=['</tool_call>', '</answer>', '<|im_end|>'])
+            else:
+                text, ended, n_tokens = generate(encoded, budget)
         except Exception as error:
             if log:
                 log(f"turn={turn + 1}/{max_turns} generation error={type(error).__name__} elapsed={time.monotonic() - start:.2f}s")
@@ -311,7 +317,7 @@ def run_agent(messages, tokenizer, generate, tools, max_turns=32,
         if not ended:
             status = 'generation_limit'; break
         try:
-            calls = parse_calls(text)
+            calls = parse_calls(text, call_protocol)
         except ValueError as error:
             event = dict(error=str(error), kind='invalid_call', retry_requested=False)
             events.append(event)

@@ -2,7 +2,7 @@
 
 HotpotQA 的独立数据准备、生成和评分见 [37 HotpotQA vLLM](37_hotpotqa_vllm.md)。
 
-三种方法共享 Qwen3.5 的 chat template、search/open/find 工具协议、观测遮蔽和评测格式。Baseline/Plain 客户端在 cu126 环境中加载 tokenizer 并渲染 token ID，请求本机 vLLM 的 `/v1/completions`。Beacon 使用相同 token ID 与浏览器，本地执行 `beacon_generate` 压缩工具正文。每题的浏览器游标、工具计数和轨迹独立保存。检索复用项目的本地 Lucene 或 FAISS 和 SQLite，生成结束后使用 BrowseComp-Plus 官方判分模板分别计算答案和检索指标。[上游运行参数](https://github.com/i-DeepSearch/observation-masking/blob/main/run_agent.sh) · [上游模型客户端](https://github.com/i-DeepSearch/observation-masking/blob/main/utils/openai_generator.py) · [上游遮蔽算法](https://github.com/i-DeepSearch/observation-masking/blob/main/tools/context_management.py)
+默认 `qwen-native` 下，三种方法共享 Qwen3.5 的 chat template、search/open/find 工具协议、观测遮蔽和评测格式。Baseline/Plain 客户端在 cu126 环境中加载 tokenizer 并渲染 token ID，请求本机 vLLM 的 `/v1/completions`。Beacon 使用相同 token ID 与浏览器，本地执行 `beacon_generate` 压缩工具正文。每题的浏览器游标、工具计数和轨迹独立保存。检索复用项目的本地 Lucene 或 FAISS 和 SQLite，生成结束后使用 BrowseComp-Plus 官方判分模板分别计算答案和检索指标。[上游运行参数](https://github.com/i-DeepSearch/observation-masking/blob/main/run_agent.sh) · [上游模型客户端](https://github.com/i-DeepSearch/observation-masking/blob/main/utils/openai_generator.py) · [上游遮蔽算法](https://github.com/i-DeepSearch/observation-masking/blob/main/tools/context_management.py)
 
 上游 README 将 Qwen3.5-4B + BM25 列为实验设置，部署示例使用 9B。本项目将其 Qwen3.5 部署和原生工具流程应用于 4B，复用本项目的数据版本、检索索引、答题清单和裁判配置。与论文成绩对齐时需另核对题序、提示词、模型/索引 revision、窗口及裁判。[上游实验说明](https://github.com/i-DeepSearch/observation-masking#analysis--findings) · [参考提交 681de57](https://github.com/i-DeepSearch/observation-masking/tree/681de57410072a33d1f62fc5f39b1c5208900675)
 
@@ -19,7 +19,9 @@ Beacon 在 `scripts/beacon/sh/46_run_browsecomp_plus.sh` 填写 `SA_TRAINING_RUN
 bash scripts/beacon/sh/46_run_browsecomp_plus.sh
 ```
 
-旧 Beacon 的 42、以及 46 的 benchmark/training profile 仅供复现旧实验。新对照使用 qwen-native，`PROMPT_DATA` 留空。表中的 vLLM 配置仅适用于 Baseline/Plain，其余检索与预算默认值适用于三个方法。
+Plain/Beacon 的 46 固定为 qwen-native 浏览器实验，`PROMPT_DATA` 留空；旧 Beacon 的 42 保留旧实验流程。表中的 vLLM 配置仅适用于 Baseline/Plain，其余浏览器检索与预算默认值适用于三个方法。
+
+Plain/Beacon 的官方任务实验使用独立的 `48_run_browsecomp_plus_official.sh`；原始 SFT 协议使用 `49_run_browsecomp_plus_original.sh`。三个入口禁止切换提示词协议，已有实验须使用原入口评分。主/辅助分片处理、参数及复现边界见 [主分片官方任务对齐](21_browsecomp_sft.md#主分片的官方任务对齐)。Baseline 入口保持原样。
 
 ## 2. Baseline/Plain 启动服务并生成
 
@@ -87,4 +89,4 @@ export SA_GENERATION__EMBEDDING_DEVICE=cuda:0
 
 对照时固定 `BENCHMARK_DIR`、`LIMIT`、`PROMPT_DATE`、`TOPK`、全部生成预算、解码参数、`OBSERVATION_WINDOW` 与裁判。`RUN_NAME` 分别标记方法和检索器，如 `beacon_bm25`、`beacon_dense`。`OVERLAP=off` 保留完整题集；若筛选训练重合，必须核对各方法实际 selected IDs，题集不同的结果不能直接比较。相同 seed 在不同推理后端不保证逐 token 相同。
 
-Beacon 的原生浏览器与 Baseline/Plain 一样，每条工具结果最多保留 12000 字符的推理可见文本，完整结果保存在轨迹。`MAX_TOOL_TOKENS`、`TOOL_CALL_RETRIES`、`SNIPPET_TOKENS`、`READ_TOKENS`、`ALLOW_VISIT` 仅在 Beacon 旧 benchmark/training 协议生效；原生协议按 browser 的 search/open/find 参数控制读取。`MAX_CONTEXT` 按压缩前的输入 token 数和输出预算检查，三种方法口径相同。
+Beacon 的原生浏览器与 Baseline/Plain 一样，每条工具结果最多保留 12000 字符的推理可见文本，完整结果保存在轨迹。`MAX_TOOL_TOKENS`、`TOOL_CALL_RETRIES`、`SNIPPET_TOKENS`、`READ_TOKENS`、`ALLOW_VISIT` 在 Plain/Beacon 的 original 和 Beacon 旧 benchmark/training 协议生效；原生协议按 browser 的 search/open/find 参数控制读取。`MAX_CONTEXT` 按压缩前的输入 token 数和输出预算检查，三种方法口径相同。

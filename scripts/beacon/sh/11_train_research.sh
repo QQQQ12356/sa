@@ -28,7 +28,7 @@ export DISTRIBUTED_BACKEND=zero2
 
 # DATASET_NAME：research、browsecomp-sft 或 mixed。切换数据身份时请同时修改 DATASET_DIR。
 export SA_DATASET_NAME=research
-# BrowseComp SFT 示例：artifacts/datasets/browsecomp-sft/prepared/browsecomp_sft_planner_qwen35_L16384_s42
+# BrowseComp-Plus SFT 示例：artifacts/datasets/browsecomp-sft/prepared/browsecomp_sft_planner_qwen35_L16384_s42
 # DATASET_DIR：已预处理数据版本，包含 train/validation/test.jsonl 与 manifest.json
 export SA_DATASET_DIR=artifacts/datasets/research/prepared/qwen35_L16384_s42
 
