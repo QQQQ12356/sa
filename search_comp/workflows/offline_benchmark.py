@@ -713,6 +713,9 @@ def run(args):
             parser.error("dense retrieval requires --vector-index-dir and --embedding-model-path")
         args.vector_index_dir = Path(args.vector_index_dir)
         args.embedding_model_path = Path(args.embedding_model_path)
+    snippet_tokenizer_path = getattr(args, "snippet_tokenizer_path", None)
+    if snippet_tokenizer_path:
+        args.snippet_tokenizer_path = Path(snippet_tokenizer_path)
     for key, value in vars(args).items():
         if isinstance(value, Path):
             setattr(args, key, value.expanduser().resolve())
