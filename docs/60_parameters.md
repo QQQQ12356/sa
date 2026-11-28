@@ -178,7 +178,7 @@ BrowseComp-Plus SFT 默认 `SA_SYSTEM_PROMPT_MODE=by-shard`，`SA_MAIN_PROMPT_MO
 | save_total_limit | `2` | Research 为 `2` | 周期 checkpoint 最大保留数。Research 入口用 `0` 表示不限制，最终模型单独保存。 |
 | beacon_layout_policy | `'—'` | `'configured'` | configured 采用 BEACON 中的布局；whole 强制整段兼容布局并规范化相关字段。 |
 | distill_teacher_model_name_or_path | `'—'` | `空字符串` | 蒸馏 teacher；null 使用 student 基座，启用蒸馏需额外资源 |
-| distill_teacher_device | `'—'` | `'auto'` | teacher 设备；auto 或显式设备 |
+| distill_teacher_device | `'—'` | `'auto'` | teacher 设备；auto/cuda 按 LOCAL_RANK 放到各进程 GPU（单进程使用当前 GPU，无 CUDA 时 auto 回退 CPU）；支持 cpu、cuda:N，多进程显式序号须与 LOCAL_RANK 一致；序号相对于 CUDA_VISIBLE_DEVICES |
 | warmup_steps | `'—'` | `0` | Beacon 预热 optimizer 步数 |
 | length_diagnostics_samples | `'—'` | `128` | 训练前统计样本数；0 可关闭 |
 

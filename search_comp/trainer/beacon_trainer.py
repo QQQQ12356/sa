@@ -294,11 +294,8 @@ def main_train(
         teacher_path = cfg.get("distill_teacher_model_name_or_path") or cfg["model_name_or_path"]
         if not teacher_path:
             raise ValueError("输出蒸馏需要配置 distill_teacher_model_name_or_path")
-        teacher_device = cfg.get("distill_teacher_device", "auto")
-        if teacher_device == "auto" and (cfg.get("deepspeed") or int(os.environ.get("WORLD_SIZE", "1")) > 1):
-            teacher_device = "cpu"
-        if teacher_device not in {"auto", "cpu"}:
-            raise ValueError("distill_teacher_device 必须为 auto 或 cpu")
+        from ..utils.teacher_device import resolve_teacher_device
+        teacher_device = resolve_teacher_device(cfg.get("distill_teacher_device", "auto"))
         # 两者须有相同 token ID 语义；仅检查 vocab_size 无法发现等长的错位词表。
         teacher_tokenizer = load_text_tokenizer(teacher_path)
         if teacher_tokenizer.get_vocab() != tokenizer.get_vocab():
@@ -308,7 +305,12 @@ def main_train(
             torch_dtype=next(model.parameters()).dtype,
             device_map=teacher_device,
         )
-        print(f"[beacon] 冻结原生输出蒸馏 teacher: {teacher_path}", flush=True)
+        print(
+            f"[beacon] 冻结原生输出蒸馏 teacher: {teacher_path}; "
+            f"rank={os.environ.get('RANK', '0')}; "
+            f"local_rank={os.environ.get('LOCAL_RANK', '0')}; "
+            f"device={next(teacher.parameters()).device}", flush=True,
+        )
 
     args = TrainingArguments(
         output_dir=exp_dir,
